@@ -332,6 +332,7 @@ end
 local function _saveMeta()
 	if not (writefile and CMetaFile) then return end
 	pcall(function()
+		ensureFolder(RAYVOID_BASE)   -- FIX: créer le parent avant l'enfant
 		ensureFolder(CPlaceFolder)
 		writefile(CMetaFile, HttpService:JSONEncode({
 			placeId      = game.PlaceId,
