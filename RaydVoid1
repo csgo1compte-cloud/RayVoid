@@ -256,7 +256,7 @@ end
 -- Ensures a folder exists by creating it if needed
 local function ensureFolder(folderPath)
 	if isfolder and not callSafely(isfolder, folderPath) then
-		callSafely(makefolder, folderPath)
+		pcall(makefolder, folderPath)  -- silencieux : erreur attendue si parent manquant
 	end
 end
 
@@ -332,8 +332,15 @@ end
 local function _saveMeta()
 	if not (writefile and CMetaFile) then return end
 	pcall(function()
-		ensureFolder(RAYVOID_BASE)   -- FIX: créer le parent avant l'enfant
-		ensureFolder(CPlaceFolder)
+		-- Création silencieuse des dossiers parents (pcall direct, pas callSafely)
+		if isfolder then
+			if not pcall(isfolder, RAYVOID_BASE) or not isfolder(RAYVOID_BASE) then
+				pcall(makefolder, RAYVOID_BASE)
+			end
+			if not pcall(isfolder, CPlaceFolder) or not isfolder(CPlaceFolder) then
+				pcall(makefolder, CPlaceFolder)
+			end
+		end
 		writefile(CMetaFile, HttpService:JSONEncode({
 			placeId      = game.PlaceId,
 			autoLoad     = CAutoLoad,
@@ -1343,26 +1350,23 @@ local function LoadConfiguration(rawContent)
 		_pendingRestore[FlagName] = FlagValue
 		local Flag = RayfieldLibrary.Flags[FlagName]
 		if Flag then
-			task.spawn(function()
-				local applyOk = pcall(function()
-					if Flag.Type == "ColorPicker" then
-						Flag:Set(UnpackColor(FlagValue))
-					elseif Flag.Type == "ProgressBar" then
-						if Flag.SetValue then Flag:SetValue(tonumber(FlagValue) or 0) end
-					elseif Flag.Type == "MultiToggle" then
-						if Flag.SetValue and type(FlagValue) == "table" then Flag:SetValue(FlagValue) end
-					elseif Flag.Type == "CardGrid" or Flag.Type == "FilteredCardGrid" then
-						if Flag.SetSelected and type(FlagValue) == "table" then Flag:SetSelected(FlagValue) end
-					else
-						if (Flag.CurrentValue or Flag.CurrentKeybind or Flag.CurrentOption or Flag.Color) ~= FlagValue then
-							Flag:Set(FlagValue)
-						end
-					end
-				end)
-				if not applyOk then
-					table.insert(errors, FlagName)
+			-- Synchrone : on applique immédiatement et on track les erreurs correctement
+			local applyOk = pcall(function()
+				if Flag.Type == "ColorPicker" then
+					Flag:Set(UnpackColor(FlagValue))
+				elseif Flag.Type == "ProgressBar" then
+					if Flag.SetValue then Flag:SetValue(tonumber(FlagValue) or 0) end
+				elseif Flag.Type == "MultiToggle" then
+					if Flag.SetValue and type(FlagValue) == "table" then Flag:SetValue(FlagValue) end
+				elseif Flag.Type == "CardGrid" or Flag.Type == "FilteredCardGrid" then
+					if Flag.SetSelected and type(FlagValue) == "table" then Flag:SetSelected(FlagValue) end
+				else
+					Flag:Set(FlagValue) -- toujours appeler Set, même si valeur identique
 				end
 			end)
+			if not applyOk then
+				table.insert(errors, FlagName)
+			end
 		else
 			-- Flag absent du script (script mis à jour, flag supprimé)
 			table.insert(errors, FlagName)
@@ -2176,7 +2180,7 @@ function RayfieldLibrary:CreateWindow(Settings)
 					TweenService:Create(Button.UIStroke, TweenInfo.new(0.6, Enum.EasingStyle.Exponential), {Transparency = 0}):Play()
 				else
 					if not ButtonSettings.Ext then
-						SaveConfiguration(ButtonSettings.Name..'\n')
+						-- plus d'auto-save ici : save explicite uniquement via le Settings tab
 					end
 					TweenService:Create(Button, TweenInfo.new(0.6, Enum.EasingStyle.Exponential), {BackgroundColor3 = SelectedTheme.ElementBackgroundHover}):Play()
 					TweenService:Create(Button.ElementIndicator, TweenInfo.new(0.6, Enum.EasingStyle.Exponential), {TextTransparency = 1}):Play()
@@ -2361,9 +2365,6 @@ function RayfieldLibrary:CreateWindow(Settings)
 				end
 				local r,g,b = math.floor((h*255)+0.5),math.floor((s*255)+0.5),math.floor((v*255)+0.5)
 				ColorPickerSettings.Color = Color3.fromRGB(r,g,b)
-				if not ColorPickerSettings.Ext then
-					SaveConfiguration(ColorPickerSettings.Flag..'\n'..tostring(ColorPickerSettings.Color))
-				end
 			end
 			ColorPicker.RGB.RInput.InputBox.FocusLost:connect(function()
 				rgbBoxes(ColorPicker.RGB.RInput.InputBox,"R")
