@@ -219,11 +219,13 @@ local function secureNotify(wType, title, content)
 end
 local InterfaceBuild = 'UU2NX'
 local Release = "Build 1.746"
-local RayfieldFolder = "Rayfield"
-local ConfigurationFolder = "RayVoid_cfg"
+local RayfieldFolder         = "Rayfield"
+local RAYVOID_BASE           = "RAYVOID"                       -- dossier racine unique
 local ConfigurationExtension = ".rfld"
-local VoidPrefsFolder = "RayVoid_cfg"
-local VoidPrefsFile  = "RayVoid_cfg/RayVoid.json"
+local VoidPrefsFile          = RAYVOID_BASE .. "/RayVoid.json" -- prefs globales (thème, keybind)
+-- Initialisés dans CreateWindow :
+local CPlaceFolder  = nil  -- "RAYVOID/{PlaceId}"
+local CMetaFile     = nil  -- "RAYVOID/{PlaceId}/.meta.json"
 
 
 
@@ -254,7 +256,7 @@ end
 -- Ensures a folder exists by creating it if needed
 local function ensureFolder(folderPath)
 	if isfolder and not callSafely(isfolder, folderPath) then
-		callSafely(makefolder, folderPath)
+		pcall(makefolder, folderPath)  -- silencieux : erreur attendue si parent manquant
 	end
 end
 
@@ -268,7 +270,7 @@ local ChangeTheme -- forward declaration (définie plus bas)
 local function _saveVoidPrefs()
 	if not (isfile and writefile) then return end
 	pcall(function()
-		ensureFolder(VoidPrefsFolder)
+		ensureFolder(RAYVOID_BASE)
 		local data = {
 			theme   = (function()
 				for name, t in pairs(RayfieldLibrary.Theme) do
@@ -303,8 +305,63 @@ end
 
 
 
-if debugX then
-	warn('Moving on to continue initialisation')
+-- ════════════════════════════════════════════════════════════════════════════
+--  MULTI-CONFIG HELPERS
+-- ════════════════════════════════════════════════════════════════════════════
+
+-- Liste les noms de configs disponibles dans CPlaceFolder (sans extension)
+local function _listConfigs()
+	if not CPlaceFolder then return {} end
+	if not (isfolder and listfiles) then return {} end
+	if not callSafely(isfolder, CPlaceFolder) then return {} end
+	local result = {}
+	local ok, files = pcall(listfiles, CPlaceFolder)
+	if not ok then return {} end
+	for _, f in ipairs(files) do
+		-- Compatibilité slash / backslash entre executors
+		local name = string.match(f, "([^/\\]+)%" .. ConfigurationExtension .. "$")
+		if name and name ~= ".meta" then
+			table.insert(result, name)
+		end
+	end
+	table.sort(result)
+	return result
+end
+
+-- Sauvegarde le méta du jeu courant (auto-load, slot sélectionné)
+local function _saveMeta()
+	if not (writefile and CMetaFile) then return end
+	pcall(function()
+		-- Création silencieuse des dossiers parents (pcall direct, pas callSafely)
+		if isfolder then
+			if not pcall(isfolder, RAYVOID_BASE) or not isfolder(RAYVOID_BASE) then
+				pcall(makefolder, RAYVOID_BASE)
+			end
+			if not pcall(isfolder, CPlaceFolder) or not isfolder(CPlaceFolder) then
+				pcall(makefolder, CPlaceFolder)
+			end
+		end
+		writefile(CMetaFile, HttpService:JSONEncode({
+			placeId      = game.PlaceId,
+			autoLoad     = CAutoLoad,
+			selectedSlot = CActiveSlot or "",
+		}))
+	end)
+end
+
+-- Charge le méta du jeu courant
+local function _loadMeta()
+	if not (isfile and readfile and CMetaFile) then return end
+	pcall(function()
+		if not isfile(CMetaFile) then return end
+		local ok, data = pcall(function()
+			return HttpService:JSONDecode(readfile(CMetaFile))
+		end)
+		if not ok or type(data) ~= "table" then return end
+		if data.placeId ~= game.PlaceId then return end  -- sécurité
+		CAutoLoad   = data.autoLoad == true
+		CActiveSlot = (type(data.selectedSlot) == "string" and data.selectedSlot ~= "") and data.selectedSlot or nil
+	end)
 end
 
 local RayfieldLibrary = {
@@ -703,6 +760,12 @@ local globalLoaded
 local rayfieldDestroyed = false -- True when RayfieldLibrary:Destroy() is called
 local _pendingRestore = {} -- Flag -> valeur sauvegardée, en attente que le composant soit créé
 
+-- ════════════════════════════════════════════════════════════════════════════
+--  SIDE TAB MODE — activé via SideTabs = true dans CreateWindow
+-- ════════════════════════════════════════════════════════════════════════════
+local _sideTabMode  = false  -- true si tabs sur le côté gauche
+local _sideTabWidth = 130    -- largeur de la sidebar en pixels
+
 repeat
 	if Rayfield:FindFirstChild('Build') and Rayfield.Build.Value == InterfaceBuild then
 		correctBuild = true
@@ -898,8 +961,10 @@ LoadingFrame.Version.Text = Release
 local Icons = useStudio and require(script.Parent.icons) or loadWithTimeout('https://raw.githubusercontent.com/SiriusSoftwareLtd/Rayfield/refs/heads/main/icons.lua')
 -- Variables
 
-local CFileName = nil
-local CEnabled = false
+local CActiveSlot    = nil    -- nom du slot actif (string, sans extension)
+local CEnabled       = false  -- ConfigurationSaving.Enabled
+local CAutoLoad      = false  -- auto-load au lancement (5s)
+local CAutoLoadConn  = nil    -- connexion task.delay auto-load
 local Minimised = false
 local Hidden = false
 local Debounce = false
@@ -1263,45 +1328,53 @@ local function UnpackColor(Color)
 	return Color3.fromRGB(Color.R, Color.G, Color.B)
 end
 
-local function LoadConfiguration(Configuration)
-	local success, Data = pcall(function() return HttpService:JSONDecode(Configuration) end)
-	local changed
+-- Charge une configuration depuis son contenu JSON.
+-- Retourne { errors = {flagName,...} } — errors vide = succès total.
+local function LoadConfiguration(rawContent)
+	local ok, parsed = pcall(function() return HttpService:JSONDecode(rawContent) end)
+	if not ok or type(parsed) ~= "table" then
+		return nil, {"JSON invalide"}
+	end
 
-	if not success then warn('Rayfield had an issue decoding the configuration file, please try delete the file and reopen Rayfield.') return end
+	-- Vérification placeId embarqué
+	if parsed.placeId ~= nil and parsed.placeId ~= game.PlaceId then
+		return nil, {"PlaceId mismatch (" .. tostring(parsed.placeId) .. " ≠ " .. tostring(game.PlaceId) .. ")"}
+	end
 
-	-- Stocker toutes les valeurs du fichier en attente (pendingRestore)
-	-- Les composants déjà créés sont restaurés immédiatement
-	-- Les composants dynamiques (créés plus tard) récupèreront leur valeur à la création
+	-- Support ancien format (flat) et nouveau format {placeId, flags}
+	local Data = parsed.flags or parsed
+
+	local errors = {}
+
 	for FlagName, FlagValue in pairs(Data) do
 		_pendingRestore[FlagName] = FlagValue
 		local Flag = RayfieldLibrary.Flags[FlagName]
 		if Flag then
-			task.spawn(function()
+			-- Synchrone : on applique immédiatement et on track les erreurs correctement
+			local applyOk = pcall(function()
 				if Flag.Type == "ColorPicker" then
-					changed = true
 					Flag:Set(UnpackColor(FlagValue))
 				elseif Flag.Type == "ProgressBar" then
-					changed = true
 					if Flag.SetValue then Flag:SetValue(tonumber(FlagValue) or 0) end
 				elseif Flag.Type == "MultiToggle" then
-					changed = true
 					if Flag.SetValue and type(FlagValue) == "table" then Flag:SetValue(FlagValue) end
 				elseif Flag.Type == "CardGrid" or Flag.Type == "FilteredCardGrid" then
-					changed = true
 					if Flag.SetSelected and type(FlagValue) == "table" then Flag:SetSelected(FlagValue) end
 				else
-					if (Flag.CurrentValue or Flag.CurrentKeybind or Flag.CurrentOption or Flag.Color) ~= FlagValue then
-						changed = true
-						Flag:Set(FlagValue)
-					end
+					Flag:Set(FlagValue) -- toujours appeler Set, même si valeur identique
 				end
 			end)
+			if not applyOk then
+				table.insert(errors, FlagName)
+			end
+		else
+			-- Flag absent du script (script mis à jour, flag supprimé)
+			table.insert(errors, FlagName)
 		end
 	end
 
-	return changed
+	return true, errors
 end
-
 -- Applique une valeur en attente à un composant qui vient d'être créé dynamiquement
 local function _applyPendingRestore(flagName, obj)
 	local val = _pendingRestore[flagName]
@@ -1317,58 +1390,50 @@ local function _applyPendingRestore(flagName, obj)
 	end)
 end
 
-local function SaveConfiguration()
+-- Sauvegarde le slot donné (ou CActiveSlot) avec snapshot complet des flags.
+-- Si le fichier existe déjà il est écrasé (clear + write).
+local function SaveConfiguration(slotName)
 	if not CEnabled then return end
-
-	if debugX then
-		print('Saving')
+	slotName = slotName or CActiveSlot
+	if not slotName or slotName == "" then
+		warn("RayVoid | SaveConfiguration : aucun slot actif.")
+		return
 	end
+	if not CPlaceFolder then return end
 
-	local Data = {}
+	local flags = {}
 	for i, v in pairs(RayfieldLibrary.Flags) do
 		if v.Type == "ColorPicker" then
-			Data[i] = PackColor(v.Color)
+			flags[i] = PackColor(v.Color)
 		elseif v.Type == "ProgressBar" then
-			Data[i] = v.GetValue and v:GetValue() or 0
+			flags[i] = v.GetValue and v:GetValue() or 0
 		elseif v.Type == "MultiToggle" then
-			Data[i] = v.GetValue and v:GetValue() or {}
+			flags[i] = v.GetValue and v:GetValue() or {}
 		elseif v.Type == "CardGrid" or v.Type == "FilteredCardGrid" then
-			Data[i] = v.GetSelected and v:GetSelected() or {}
+			flags[i] = v.GetSelected and v:GetSelected() or {}
 		else
-			if typeof(v.CurrentValue) == 'boolean' then
-				if v.CurrentValue == false then
-					Data[i] = false
-				else
-					Data[i] = v.CurrentValue or v.CurrentKeybind or v.CurrentOption or v.Color
-				end
+			if typeof(v.CurrentValue) == "boolean" then
+				flags[i] = v.CurrentValue
 			else
-				Data[i] = v.CurrentValue or v.CurrentKeybind or v.CurrentOption or v.Color
+				flags[i] = v.CurrentValue or v.CurrentKeybind or v.CurrentOption or v.Color
 			end
 		end
 	end
 
-	if useStudio then
-		if script.Parent:FindFirstChild('configuration') then script.Parent.configuration:Destroy() end
+	local payload = HttpService:JSONEncode({
+		placeId = game.PlaceId,
+		flags   = flags,
+	})
 
-		local ScreenGui = Instance.new("ScreenGui")
-		ScreenGui.Parent = script.Parent
-		ScreenGui.Name = 'configuration'
+	ensureFolder(RAYVOID_BASE)
+	ensureFolder(CPlaceFolder)
+	local path = CPlaceFolder .. "/" .. slotName .. ConfigurationExtension
+	callSafely(writefile, path, payload)
 
-		local TextBox = Instance.new("TextBox")
-		TextBox.Parent = ScreenGui
-		TextBox.Size = UDim2.new(0, 800, 0, 50)
-		TextBox.AnchorPoint = Vector2.new(0.5, 0)
-		TextBox.Position = UDim2.new(0.5, 0, 0, 30)
-		TextBox.Text = HttpService:JSONEncode(Data)
-		TextBox.ClearTextOnFocus = false
-	end
+	CActiveSlot = slotName
+	_saveMeta()
 
-	if debugX then
-		warn(HttpService:JSONEncode(Data))
-	end
-
-
-	callSafely(writefile, ConfigurationFolder .. "/" .. CFileName .. ConfigurationExtension, tostring(HttpService:JSONEncode(Data)))
+	if debugX then warn("RayVoid | SaveConfiguration → " .. path) end
 end
 
 function RayfieldLibrary:Notify(data) -- action e.g open messages
@@ -1661,7 +1726,9 @@ local function Maximise()
 	TweenService:Create(Main.Shadow.Image, TweenInfo.new(0.5, Enum.EasingStyle.Exponential), {ImageTransparency = 0.6}):Play()
 	TweenService:Create(Topbar.CornerRepair, TweenInfo.new(0.5, Enum.EasingStyle.Exponential), {BackgroundTransparency = 0}):Play()
 	TweenService:Create(Topbar.Divider, TweenInfo.new(0.5, Enum.EasingStyle.Exponential), {BackgroundTransparency = 0}):Play()
-	TweenService:Create(dragBarCosmetic, TweenInfo.new(0.25, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {BackgroundTransparency = 0.7}):Play()
+	if dragBarCosmetic then  -- FIX: nil-check
+		TweenService:Create(dragBarCosmetic, TweenInfo.new(0.25, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {BackgroundTransparency = 0.7}):Play()
+	end
 	TweenService:Create(Main, TweenInfo.new(0.5, Enum.EasingStyle.Exponential), {Size = useMobileSizing and UDim2.new(0, 500, 0, 275) or UDim2.new(0, 500, 0, 475)}):Play()
 	TweenService:Create(Topbar, TweenInfo.new(0.5, Enum.EasingStyle.Exponential), {Size = UDim2.new(0, 500, 0, 45)}):Play()
 	TabList.Visible = true
@@ -1724,7 +1791,9 @@ local function Unhide()
 
 	setElementsVisible(true)
 
-	TweenService:Create(dragBarCosmetic, TweenInfo.new(0.25, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {BackgroundTransparency = 0.5}):Play()
+	if dragBarCosmetic then  -- FIX: nil-check
+		TweenService:Create(dragBarCosmetic, TweenInfo.new(0.25, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {BackgroundTransparency = 0.5}):Play()
+	end
 
 	task.wait(0.5)
 	Minimised = false
@@ -1743,7 +1812,9 @@ local function Minimise()
 
 	setElementsVisible(false)
 
-	TweenService:Create(dragBarCosmetic, TweenInfo.new(0.25, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {BackgroundTransparency = 1}):Play()
+	if dragBarCosmetic then  -- FIX: nil-check
+		TweenService:Create(dragBarCosmetic, TweenInfo.new(0.25, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {BackgroundTransparency = 1}):Play()
+	end
 	TweenService:Create(Topbar.UIStroke, TweenInfo.new(0.5, Enum.EasingStyle.Exponential), {Transparency = 0}):Play()
 	TweenService:Create(Main.Shadow.Image, TweenInfo.new(0.5, Enum.EasingStyle.Exponential), {ImageTransparency = 1}):Play()
 	TweenService:Create(Topbar.CornerRepair, TweenInfo.new(0.5, Enum.EasingStyle.Exponential), {BackgroundTransparency = 1}):Play()
@@ -1798,6 +1869,13 @@ function RayfieldLibrary:CreateWindow(Settings)
 		else
 			error("ToggleUIKeybind must be a string or KeyCode enum")
 		end
+	end
+
+	-- ════════════════════════════════════════════════════════════════════
+	--  SIDE TABS — active le mode sidebar gauche
+	-- ════════════════════════════════════════════════════════════════════
+	if Settings.SideTabs then
+		_sideTabMode = true
 	end
 
 	ensureFolder(RayfieldFolder)
@@ -1872,12 +1950,16 @@ function RayfieldLibrary:CreateWindow(Settings)
 			Settings.ConfigurationSaving.Enabled = false
 		end
 
-		CFileName = Settings.ConfigurationSaving.FileName
-		ConfigurationFolder = Settings.ConfigurationSaving.FolderName or ConfigurationFolder
+		CActiveSlot = Settings.ConfigurationSaving.FileName or nil  -- slot par défaut optionnel
 		CEnabled = Settings.ConfigurationSaving.Enabled
 
 		if Settings.ConfigurationSaving.Enabled then
-			ensureFolder(ConfigurationFolder)
+			-- Structure : RAYVOID/{PlaceId}/
+			CPlaceFolder = RAYVOID_BASE .. "/" .. tostring(game.PlaceId)
+			CMetaFile    = CPlaceFolder .. "/.meta.json"
+			ensureFolder(RAYVOID_BASE)
+			ensureFolder(CPlaceFolder)
+			_loadMeta()  -- récupère CAutoLoad et CActiveSlot sauvegardés
 		end
 	end)
 
@@ -1930,7 +2012,18 @@ function RayfieldLibrary:CreateWindow(Settings)
 		TabButton.Title.Text = Name
 		TabButton.Parent = TabList
 		TabButton.Title.TextWrapped = false
-		TabButton.Size = UDim2.new(0, TabButton.Title.TextBounds.X + 30, 0, 30)
+		-- ════════════════════════════════════════════════════════════════
+		--  SIDE TAB MODE — sizing adapté à la sidebar verticale
+		-- ════════════════════════════════════════════════════════════════
+		if _sideTabMode then
+			TabButton.Size                 = UDim2.new(1, -8, 0, 36)
+			TabButton.Title.TextWrapped    = true
+			TabButton.Title.Position       = UDim2.new(0, 10, 0.5, 0)
+			TabButton.Title.AnchorPoint    = Vector2.new(0, 0.5)
+			TabButton.Title.TextXAlignment = Enum.TextXAlignment.Left
+		else
+			TabButton.Size = UDim2.new(0, TabButton.Title.TextBounds.X + 30, 0, 30)
+		end
 
 		if Image and Image ~= 0 then
 			local img, rectOffset, rectSize = resolveIcon(Image)
@@ -1938,11 +2031,13 @@ function RayfieldLibrary:CreateWindow(Settings)
 			if rectOffset then TabButton.Image.ImageRectOffset = rectOffset end
 			if rectSize then TabButton.Image.ImageRectSize = rectSize end
 
-			TabButton.Title.AnchorPoint = Vector2.new(0, 0.5)
-			TabButton.Title.Position = UDim2.new(0, 37, 0.5, 0)
-			TabButton.Image.Visible = true
+			TabButton.Title.AnchorPoint    = Vector2.new(0, 0.5)
+			TabButton.Title.Position       = UDim2.new(0, 37, 0.5, 0)
+			TabButton.Image.Visible        = true
 			TabButton.Title.TextXAlignment = Enum.TextXAlignment.Left
-			TabButton.Size = UDim2.new(0, TabButton.Title.TextBounds.X + 52, 0, 30)
+			if not _sideTabMode then
+				TabButton.Size = UDim2.new(0, TabButton.Title.TextBounds.X + 52, 0, 30)
+			end
 		end
 
 
@@ -2085,7 +2180,7 @@ function RayfieldLibrary:CreateWindow(Settings)
 					TweenService:Create(Button.UIStroke, TweenInfo.new(0.6, Enum.EasingStyle.Exponential), {Transparency = 0}):Play()
 				else
 					if not ButtonSettings.Ext then
-						SaveConfiguration(ButtonSettings.Name..'\n')
+						-- plus d'auto-save ici : save explicite uniquement via le Settings tab
 					end
 					TweenService:Create(Button, TweenInfo.new(0.6, Enum.EasingStyle.Exponential), {BackgroundColor3 = SelectedTheme.ElementBackgroundHover}):Play()
 					TweenService:Create(Button.ElementIndicator, TweenInfo.new(0.6, Enum.EasingStyle.Exponential), {TextTransparency = 1}):Play()
@@ -2270,9 +2365,6 @@ function RayfieldLibrary:CreateWindow(Settings)
 				end
 				local r,g,b = math.floor((h*255)+0.5),math.floor((s*255)+0.5),math.floor((v*255)+0.5)
 				ColorPickerSettings.Color = Color3.fromRGB(r,g,b)
-				if not ColorPickerSettings.Ext then
-					SaveConfiguration(ColorPickerSettings.Flag..'\n'..tostring(ColorPickerSettings.Color))
-				end
 			end
 			ColorPicker.RGB.RInput.InputBox.FocusLost:connect(function()
 				rgbBoxes(ColorPicker.RGB.RInput.InputBox,"R")
@@ -3518,6 +3610,7 @@ function RayfieldLibrary:CreateWindow(Settings)
 			Container.Name = "CardGrid"
 			Container.BackgroundTransparency = 1
 			Container.Size = UDim2.new(1, 0, 0, totalH)
+			Container:SetAttribute("BackgroundTransparencyTarget", 1)  -- FIX: évite le bug de couleur au minimize/maximize
 			Container.Parent = TabPage
 
 			local grid = VMakeFrame(Container, UDim2.new(1, 0, 1, 0), nil, VC.Black, 1)
@@ -3664,6 +3757,7 @@ function RayfieldLibrary:CreateWindow(Settings)
 			ctrlContainer.Name                = "FilteredCardGrid_Ctrl"
 			ctrlContainer.BackgroundTransparency = 1
 			ctrlContainer.Size                = UDim2.new(1, 0, 0, 34)
+			ctrlContainer:SetAttribute("BackgroundTransparencyTarget", 1)  -- FIX: évite le bug de couleur au minimize/maximize
 			ctrlContainer.Parent              = TabPage
 
 			local dropBg = VMakeFrame(ctrlContainer,
@@ -3735,6 +3829,7 @@ function RayfieldLibrary:CreateWindow(Settings)
 			gridContainer.Name                = "FilteredCardGrid_Grid"
 			gridContainer.BackgroundTransparency = 1
 			gridContainer.Size                = UDim2.new(1, 0, 0, 0)
+			gridContainer:SetAttribute("BackgroundTransparencyTarget", 1)  -- FIX: évite le bug de couleur au minimize/maximize
 			gridContainer.Parent              = TabPage
 
 			local function RefreshScroll()
@@ -4121,6 +4216,49 @@ function RayfieldLibrary:CreateWindow(Settings)
 		TweenService:Create(dragBarCosmetic, TweenInfo.new(0.6, Enum.EasingStyle.Exponential), {BackgroundTransparency = 0.7}):Play()
 	end
 
+	-- ════════════════════════════════════════════════════════════════════════
+	--  LAYOUT SIDE TABS — reconfigure TabList en sidebar verticale gauche
+	--  et décale Elements à droite (activé si SideTabs = true)
+	-- ════════════════════════════════════════════════════════════════════════
+	if _sideTabMode then
+		local sw = _sideTabWidth
+
+		-- TabList → sidebar verticale gauche
+		TabList.Size     = UDim2.new(0, sw, 1, -45)
+		TabList.Position = UDim2.new(0, 0, 0, 45)
+		TabList.BackgroundTransparency = 0
+		TabList.BackgroundColor3 = SelectedTheme.Topbar
+
+		local tll = TabList:FindFirstChildOfClass("UIListLayout")
+		if tll then
+			tll.FillDirection       = Enum.FillDirection.Vertical
+			tll.HorizontalAlignment = Enum.HorizontalAlignment.Left
+			tll.SortOrder           = Enum.SortOrder.LayoutOrder
+			tll.Padding             = UDim.new(0, 4)
+		end
+		local tlp = TabList:FindFirstChildOfClass("UIPadding")
+		if tlp then
+			tlp.PaddingTop    = UDim.new(0, 6)
+			tlp.PaddingBottom = UDim.new(0, 6)
+			tlp.PaddingLeft   = UDim.new(0, 4)
+			tlp.PaddingRight  = UDim.new(0, 4)
+		end
+
+		-- Elements → décalé à droite de la sidebar
+		Elements.Size     = UDim2.new(1, -sw, 1, -45)
+		Elements.Position = UDim2.new(0, sw, 0, 45)
+
+		-- Diviseur vertical entre sidebar et contenu
+		local sideDiv = Instance.new("Frame")
+		sideDiv.Name             = "SideTabDivider"
+		sideDiv.Size             = UDim2.new(0, 1, 1, -45)
+		sideDiv.Position         = UDim2.new(0, sw, 0, 45)
+		sideDiv.BackgroundColor3 = SelectedTheme.ElementStroke
+		sideDiv.BorderSizePixel  = 0
+		sideDiv.ZIndex           = 5
+		sideDiv.Parent           = Main
+	end
+
 	function Window.ModifyTheme(NewTheme)
 		local success = pcall(ChangeTheme, NewTheme)
 		if not success then
@@ -4135,30 +4273,125 @@ function RayfieldLibrary:CreateWindow(Settings)
 	-- ════════════════════════════════════════════════════════════════════════
 	local SettingsTab = Window:CreateTab('Rayfield Settings', 0, true)
 
-	SettingsTab:CreateSection('Configuration')
+	-- ════════════════════════════════════════════════════════════════════════
+	--  SECTION CONFIGURATIONS — multi-slot par jeu
+	-- ════════════════════════════════════════════════════════════════════════
+	SettingsTab:CreateSection('Configurations')
 
-	SettingsTab:CreateButton({
-		Name     = 'Sauvegarder la config',
-		Callback = function()
-			if not CEnabled then
-				RayfieldLibrary:Notify({Title = 'Config', Content = 'La sauvegarde de config n\'est pas activée pour ce script.', Duration = 4, Image = 4400704299})
-				return
-			end
-			SaveConfiguration()
-			RayfieldLibrary:Notify({Title = 'Config sauvegardée', Content = 'Tous tes paramètres ont été sauvegardés.', Duration = 3, Image = 4384403532})
-		end,
-	})
+	if not CEnabled then
+		SettingsTab:CreateLabel('La sauvegarde de config n\'est pas activée pour ce script.', nil, nil, true)
+	else
+		-- Dropdown des slots existants
+		local configSlots = _listConfigs()
+		local noSlots = #configSlots == 0
+		if noSlots then configSlots = {"(aucune config)"}end
 
-	SettingsTab:CreateButton({
-		Name     = 'Charger la config',
-		Callback = function()
-			if not CEnabled then
-				RayfieldLibrary:Notify({Title = 'Config', Content = 'La sauvegarde de config n\'est pas activée pour ce script.', Duration = 4, Image = 4400704299})
-				return
+		local slotDropdown = SettingsTab:CreateDropdown({
+			Name          = 'Config active',
+			Options       = configSlots,
+			CurrentOption = (CActiveSlot and {CActiveSlot}) or {configSlots[1]},
+			Callback      = function() end,  -- on agit seulement via les boutons
+		})
+
+		-- Helper interne : rafraîchit le dropdown après création/suppression
+		local function _refreshSlotDropdown()
+			local slots = _listConfigs()
+			if #slots == 0 then slots = {"(aucune config)"} end
+			slotDropdown:Refresh(slots)
+			if CActiveSlot and table.find(slots, CActiveSlot) then
+				slotDropdown:Set({CActiveSlot})
+			elseif #slots > 0 and slots[1] ~= "(aucune config)" then
+				slotDropdown:Set({slots[1]})
 			end
-			RayfieldLibrary:LoadConfiguration()
-		end,
-	})
+		end
+
+		-- Charger le slot sélectionné
+		SettingsTab:CreateButton({
+			Name     = 'Charger',
+			Callback = function()
+				local sel = slotDropdown.CurrentOption and slotDropdown.CurrentOption[1]
+				if not sel or sel == "(aucune config)" then
+					RayfieldLibrary:Notify({Title = 'Config', Content = 'Sélectionne une config à charger.', Duration = 3, Image = 4400704299})
+					return
+				end
+				RayfieldLibrary:LoadConfiguration(sel)
+			end,
+		})
+
+		-- Sauvegarder dans le slot actif
+		SettingsTab:CreateButton({
+			Name     = 'Sauvegarder',
+			Callback = function()
+				local sel = slotDropdown.CurrentOption and slotDropdown.CurrentOption[1]
+				if not sel or sel == "(aucune config)" then
+					RayfieldLibrary:Notify({Title = 'Config', Content = 'Sélectionne ou crée une config d\'abord.', Duration = 3, Image = 4400704299})
+					return
+				end
+				SaveConfiguration(sel)
+				RayfieldLibrary:Notify({Title = sel .. ' sauvegardé', Content = 'Snapshot complet des paramètres actuels.', Duration = 3, Image = 4384403532})
+			end,
+		})
+
+		-- Nouvelle config : nom via input + bouton
+		local newSlotName = ""
+		SettingsTab:CreateInput({
+			Name            = 'Nom de la nouvelle config',
+			PlaceholderText = 'ex: tryhard, arena...',
+			RemoveTextAfterFocusLost = false,
+			Callback        = function(val)
+				newSlotName = val:match("^%s*(.-)%s*$")  -- trim
+			end,
+		})
+
+		SettingsTab:CreateButton({
+			Name     = 'Créer et sauvegarder',
+			Callback = function()
+				if newSlotName == "" then
+					RayfieldLibrary:Notify({Title = 'Config', Content = 'Saisis un nom pour la nouvelle config.', Duration = 3, Image = 4400704299})
+					return
+				end
+				-- Caractères interdits pour les noms de fichiers
+				local safeName = newSlotName:gsub('[<>:"/\\|?*]', '_')
+				SaveConfiguration(safeName)
+				_refreshSlotDropdown()
+				slotDropdown:Set({safeName})
+				RayfieldLibrary:Notify({Title = safeName .. ' créé', Content = 'Valeurs actuelles sauvegardées.', Duration = 3, Image = 4384403532})
+				newSlotName = ""
+			end,
+		})
+
+		-- Supprimer le slot sélectionné
+		SettingsTab:CreateButton({
+			Name     = 'Supprimer cette config',
+			Callback = function()
+				local sel = slotDropdown.CurrentOption and slotDropdown.CurrentOption[1]
+				if not sel or sel == "(aucune config)" then return end
+				local path = CPlaceFolder .. "/" .. sel .. ConfigurationExtension
+				if callSafely(isfile, path) then
+					callSafely(delfile, path)
+				end
+				-- Si c'était le slot actif, on désélectionne sans changer les valeurs
+				if CActiveSlot == sel then
+					CActiveSlot = nil
+					_saveMeta()
+				end
+				_refreshSlotDropdown()
+				RayfieldLibrary:Notify({Title = 'Config supprimée', Content = sel .. ' a été supprimé. Tes paramètres actuels sont inchangés.', Duration = 4, Image = 4400704299})
+			end,
+		})
+
+		SettingsTab:CreateDivider()
+
+		-- Auto-load (5 secondes après le lancement)
+		SettingsTab:CreateToggle({
+			Name         = 'Auto-load au lancement (5s)',
+			CurrentValue = CAutoLoad,
+			Callback     = function(val)
+				CAutoLoad = val
+				_saveMeta()
+			end,
+		})
+	end  -- CEnabled
 
 	SettingsTab:CreateSection('Apparence')
 
@@ -4393,42 +4626,56 @@ for _, TopbarButton in ipairs(Topbar:GetChildren()) do
 end
 
 
-function RayfieldLibrary:LoadConfiguration()
-	local config
+-- Charge le slot donné (ou CActiveSlot) et affiche une notification propre.
+-- slotName optionnel, sinon utilise CActiveSlot.
+function RayfieldLibrary:LoadConfiguration(slotName)
+	slotName = slotName or CActiveSlot
+	if not CEnabled then return end
+	if not slotName or slotName == "" then
+		RayfieldLibrary:Notify({Title = "Config", Content = "Aucun slot sélectionné.", Duration = 4, Image = 4400704299})
+		return
+	end
+	if not CPlaceFolder then return end
 
-	if debugX then
-		warn('Loading Configuration')
+	if not isfile then
+		RayfieldLibrary:Notify({Title = "Config", Content = "Ton executor ne supporte pas le filesystem.", Duration = 5, Image = 4400704299})
+		return
 	end
 
-	if useStudio then
-		config = [[{"Toggle1adwawd":true,"ColorPicker1awd":{"B":255,"G":255,"R":255},"Slider1dawd":100,"ColorPicfsefker1":{"B":255,"G":255,"R":255},"Slidefefsr1":80,"dawdawd":"","Input1":"hh","Keybind1":"B","Dropdown1":["Ocean"]}]]
+	local path = CPlaceFolder .. "/" .. slotName .. ConfigurationExtension
+	if not callSafely(isfile, path) then
+		RayfieldLibrary:Notify({Title = "Config", Content = "Fichier introuvable : " .. slotName, Duration = 4, Image = 4400704299})
+		return
 	end
 
-	if CEnabled then
-		local notified
-		local loaded
+	local raw = callSafely(readfile, path)
+	if not raw then
+		RayfieldLibrary:Notify({Title = "Config", Content = "Impossible de lire le fichier.", Duration = 4, Image = 4400704299})
+		return
+	end
 
-		local success, result = pcall(function()
-			if useStudio and config then
-				loaded = LoadConfiguration(config)
-				return
-			end
+	local ok, errors = LoadConfiguration(raw)
+	if not ok then
+		-- errors[1] contient le message d'erreur (JSON invalide, placeId mismatch)
+		RayfieldLibrary:Notify({Title = slotName .. " — erreur", Content = errors[1] or "Erreur inconnue.", Duration = 6, Image = 4400704299})
+		return
+	end
 
-			if isfile then 
-				if callSafely(isfile, ConfigurationFolder .. "/" .. CFileName .. ConfigurationExtension) then
-					loaded = LoadConfiguration(callSafely(readfile, ConfigurationFolder .. "/" .. CFileName .. ConfigurationExtension))
-				end
-			else
-				notified = true
-				RayfieldLibrary:Notify({Title = "Rayfield Configurations", Content = "We couldn't enable Configuration Saving as you are not using software with filesystem support.", Image = 4384402990})
-			end
-		end)
+	CActiveSlot = slotName
+	_saveMeta()
 
-		if success and loaded and not notified then
-			RayfieldLibrary:Notify({Title = "Rayfield Configurations", Content = "The configuration file for this script has been loaded from a previous session.", Image = 4384403532})
-		elseif not success and not notified then
-			warn('Rayfield Configurations Error | '..tostring(result))
-			RayfieldLibrary:Notify({Title = "Rayfield Configurations", Content = "We've encountered an issue loading your configuration correctly.\n\nCheck the Developer Console for more information.", Image = 4384402990})
+	-- Notification unique
+	if #errors == 0 then
+		RayfieldLibrary:Notify({Title = slotName .. " chargé", Content = "Aucune erreur.", Duration = 4, Image = 4384403532})
+	else
+		-- Une notif par flag raté (script mis à jour, flag supprimé)
+		for _, flagName in ipairs(errors) do
+			RayfieldLibrary:Notify({Title = slotName .. " — flag manquant", Content = "\"" .. tostring(flagName) .. "\" introuvable dans le script.", Duration = 5, Image = 4400704299})
+		end
+		if #errors == 1 then
+			-- Déjà notifié ci-dessus
+		else
+			RayfieldLibrary:Notify({Title = slotName .. " chargé", Content = #errors .. " flag(s) manquant(s) — voir les notifications.", Duration = 4, Image = 4384403532})
 		end
 	end
 
@@ -4664,15 +4911,24 @@ end
 --end
 
 task.delay(4, function()
-	RayfieldLibrary.LoadConfiguration()
+	-- Masquage de la notice si visible
 	if Main:FindFirstChild('Notice') and Main.Notice.Visible then
 		TweenService:Create(Main.Notice, TweenInfo.new(0.5, Enum.EasingStyle.Exponential, Enum.EasingDirection.InOut), {Size = UDim2.new(0, 100, 0, 25), Position = UDim2.new(0.5, 0, 0, -100), BackgroundTransparency = 1}):Play()
 		TweenService:Create(Main.Notice.Title, TweenInfo.new(0.3, Enum.EasingStyle.Exponential), {TextTransparency = 1}):Play()
-
 		task.wait(0.5)
 		Main.Notice.Visible = false
 	end
 end)
+
+-- Auto-load : attend 5 secondes puis charge CActiveSlot si CAutoLoad est activé
+if CEnabled and CAutoLoad and CActiveSlot then
+	task.delay(5, function()
+		if not rayfieldDestroyed and CAutoLoad and CActiveSlot then
+			RayfieldLibrary:Notify({Title = 'Auto-load', Content = 'Chargement de "' .. CActiveSlot .. '" dans 0 s...', Duration = 2})
+			RayfieldLibrary:LoadConfiguration(CActiveSlot)
+		end
+	end)
+end
 
 -- ════════════════════════════════════════════════════════════════════════════
 --  FLOATING BUTTON — bouton flottant draggable indépendant de la fenêtre
