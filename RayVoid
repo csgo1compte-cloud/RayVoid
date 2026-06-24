@@ -20,6 +20,21 @@ local CoreGui = getService("CoreGui")
 local toggleKeybind = "K"  -- Touche pour afficher/cacher l'UI (modifiable via ToggleUIKeybind dans CreateWindow)
 
 -- ════════════════════════════════════════════════════════════════════════════
+--  VARIABLES CFG — déclarées en haut pour être accessibles par toutes les fonctions
+-- ════════════════════════════════════════════════════════════════════════════
+local RAYVOID_BASE      = "RAYVOID"
+local ConfigurationExtension = ".rfld"
+local VoidPrefsFile     = RAYVOID_BASE .. "/RayVoid.json"
+local CPlaceFolder      = nil   -- "RAYVOID/{PlaceId}"
+local CAutoloadFile     = nil   -- "RAYVOID/{PlaceId}/autoload.json"
+local CActiveSlot       = nil   -- nom du slot actif (string, sans extension)
+local CEnabled          = false -- ConfigurationSaving.Enabled
+local CAutoLoadSlot     = nil   -- slot à charger au lancement (nil = désactivé)
+local _hasFS            = false -- true si l'executor supporte le filesystem
+local _pendingTheme     = nil   -- thème lu dans VoidPrefs, appliqué après construction UI
+local _currentThemeName = "Default" -- nom du thème actif, mis à jour par ChangeTheme
+
+-- ════════════════════════════════════════════════════════════════════════════
 --  VOID HELPERS — couleurs et utilitaires pour les composants VoidUI greffés
 -- ════════════════════════════════════════════════════════════════════════════
 
@@ -219,13 +234,9 @@ local function secureNotify(wType, title, content)
 end
 local InterfaceBuild = 'UU2NX'
 local Release = "Build 1.746"
-local RayfieldFolder         = "Rayfield"
-local RAYVOID_BASE           = "RAYVOID"                       -- dossier racine unique
-local ConfigurationExtension = ".rfld"
-local VoidPrefsFile          = RAYVOID_BASE .. "/RayVoid.json" -- prefs globales (thème, keybind)
--- Initialisés dans CreateWindow :
-local CPlaceFolder  = nil  -- "RAYVOID/{PlaceId}"
-local CMetaFile     = nil  -- "RAYVOID/{PlaceId}/.meta.json"
+local RayfieldFolder = "Rayfield"
+-- RAYVOID_BASE, ConfigurationExtension, VoidPrefsFile, CPlaceFolder, CAutoloadFile
+-- déclarés en haut du fichier (avant les fonctions qui les utilisent)
 
 
 
@@ -253,10 +264,24 @@ local function callSafely(func, ...)
 	end
 end
 
+-- Vérifie si un dossier existe — compatible YuBX (isfolder peut ne pas exister)
+local function _isfolder(path)
+	if type(isfolder) == "function" then
+		local ok, result = pcall(isfolder, path)
+		return ok and result == true
+	end
+	-- Fallback : on tente de lister — si ça ne plante pas, le dossier existe
+	if type(listfiles) == "function" then
+		local ok = pcall(listfiles, path)
+		return ok
+	end
+	return false
+end
+
 -- Ensures a folder exists by creating it if needed
 local function ensureFolder(folderPath)
-	if isfolder and not callSafely(isfolder, folderPath) then
-		pcall(makefolder, folderPath)  -- silencieux : erreur attendue si parent manquant
+	if not _isfolder(folderPath) then
+		pcall(makefolder, folderPath)
 	end
 end
 
@@ -268,37 +293,43 @@ local ChangeTheme -- forward declaration (définie plus bas)
 --  Chargé au démarrage, sauvegardé à chaque changement
 -- ════════════════════════════════════════════════════════════════════════════
 local function _saveVoidPrefs()
-	if not (isfile and writefile) then return end
-	pcall(function()
-		ensureFolder(RAYVOID_BASE)
-		local data = {
-			theme   = (function()
-				for name, t in pairs(RayfieldLibrary.Theme) do
-					if t == SelectedTheme then return name end
-				end
-				return "Default"
-			end)(),
-			keybind = toggleKeybind,
-		}
-		writefile(VoidPrefsFile, HttpService:JSONEncode(data))
-	end)
+	local canWrite = _hasFS or (type(makefolder) == "function" and type(writefile) == "function")
+	print("[RV] _saveVoidPrefs appelé | canWrite=" .. tostring(canWrite) .. " _hasFS=" .. tostring(_hasFS))
+	if not canWrite then warn("[RV] _saveVoidPrefs : pas de filesystem") return end
+	if not _isfolder(RAYVOID_BASE) then
+		local ok, err = pcall(makefolder, RAYVOID_BASE)
+		print("[RV] _saveVoidPrefs makefolder(RAYVOID) ok=" .. tostring(ok) .. " err=" .. tostring(err))
+	end
+	print("[RV] _saveVoidPrefs : thème=" .. _currentThemeName .. " | écriture → " .. VoidPrefsFile)
+	local ok, err = pcall(writefile, VoidPrefsFile, HttpService:JSONEncode({
+		theme   = _currentThemeName,
+		keybind = toggleKeybind,
+	}))
+	print("[RV] _saveVoidPrefs : writefile ok=" .. tostring(ok) .. " err=" .. tostring(err))
 end
 
 local function _loadVoidPrefs()
-	if not (isfile and readfile) then return end
-	pcall(function()
-		if not isfile(VoidPrefsFile) then return end
-		local ok, data = pcall(function()
-			return HttpService:JSONDecode(readfile(VoidPrefsFile))
-		end)
-		if not ok or type(data) ~= "table" then return end
-		if type(data.keybind) == "string" and data.keybind ~= "" then
-			toggleKeybind = data.keybind
-		end
-		if type(data.theme) == "string" and RayfieldLibrary.Theme[data.theme] then
-			pcall(ChangeTheme, data.theme)
-		end
+	local canRead = _hasFS or (type(isfile) == "function" and type(readfile) == "function")
+	print("[RV] _loadVoidPrefs appelé | canRead=" .. tostring(canRead))
+	if not canRead then return end
+	local exists = isfile(VoidPrefsFile)
+	print("[RV] _loadVoidPrefs : RayVoid.json existe=" .. tostring(exists))
+	if not exists then return end
+	local ok, data = pcall(function()
+		return HttpService:JSONDecode(readfile(VoidPrefsFile))
 	end)
+	print("[RV] _loadVoidPrefs : parse ok=" .. tostring(ok) .. " type(data)=" .. type(data))
+	if not ok or type(data) ~= "table" then return end
+	if type(data.keybind) == "string" and data.keybind ~= "" then
+		toggleKeybind = data.keybind
+		print("[RV] _loadVoidPrefs : keybind chargé=" .. toggleKeybind)
+	end
+	if type(data.theme) == "string" and data.theme ~= "" then
+		-- On stocke sans vérifier RayfieldLibrary.Theme (pas encore disponible ici)
+		-- La vérification se fait dans le watcher UI ready
+		_pendingTheme = data.theme
+		print("[RV] _loadVoidPrefs : thème en attente=" .. data.theme)
+	end
 end
 
 
@@ -312,8 +343,8 @@ end
 -- Liste les noms de configs disponibles dans CPlaceFolder (sans extension)
 local function _listConfigs()
 	if not CPlaceFolder then return {} end
-	if not (isfolder and listfiles) then return {} end
-	if not callSafely(isfolder, CPlaceFolder) then return {} end
+	if not (listfiles) then return {} end
+	if not _isfolder(CPlaceFolder) then return {} end
 	local result = {}
 	local ok, files = pcall(listfiles, CPlaceFolder)
 	if not ok then return {} end
@@ -328,40 +359,31 @@ local function _listConfigs()
 	return result
 end
 
--- Sauvegarde le méta du jeu courant (auto-load, slot sélectionné)
+-- Sauvegarde le slot auto-load pour ce jeu
 local function _saveMeta()
-	if not (writefile and CMetaFile) then return end
-	pcall(function()
-		-- Création silencieuse des dossiers parents (pcall direct, pas callSafely)
-		if isfolder then
-			if not pcall(isfolder, RAYVOID_BASE) or not isfolder(RAYVOID_BASE) then
-				pcall(makefolder, RAYVOID_BASE)
-			end
-			if not pcall(isfolder, CPlaceFolder) or not isfolder(CPlaceFolder) then
-				pcall(makefolder, CPlaceFolder)
-			end
-		end
-		writefile(CMetaFile, HttpService:JSONEncode({
-			placeId      = game.PlaceId,
-			autoLoad     = CAutoLoad,
-			selectedSlot = CActiveSlot or "",
-		}))
-	end)
+	print("[RV] _saveMeta appelé | _hasFS=" .. tostring(_hasFS) .. " CAutoloadFile=" .. tostring(CAutoloadFile))
+	if not _hasFS then warn("[RV] _saveMeta : _hasFS false") return end
+	if not CAutoloadFile then warn("[RV] _saveMeta : CAutoloadFile nil") return end
+	local payload = HttpService:JSONEncode({ autoLoadSlot = CAutoLoadSlot or "" })
+	print("[RV] _saveMeta : écriture → " .. CAutoloadFile .. " | payload=" .. payload)
+	local ok, err = pcall(writefile, CAutoloadFile, payload)
+	print("[RV] _saveMeta : writefile ok=" .. tostring(ok) .. " err=" .. tostring(err))
 end
 
--- Charge le méta du jeu courant
+-- Charge le slot auto-load pour ce jeu
 local function _loadMeta()
-	if not (isfile and readfile and CMetaFile) then return end
-	pcall(function()
-		if not isfile(CMetaFile) then return end
-		local ok, data = pcall(function()
-			return HttpService:JSONDecode(readfile(CMetaFile))
-		end)
-		if not ok or type(data) ~= "table" then return end
-		if data.placeId ~= game.PlaceId then return end  -- sécurité
-		CAutoLoad   = data.autoLoad == true
-		CActiveSlot = (type(data.selectedSlot) == "string" and data.selectedSlot ~= "") and data.selectedSlot or nil
+	print("[RV] _loadMeta appelé | _hasFS=" .. tostring(_hasFS) .. " CAutoloadFile=" .. tostring(CAutoloadFile))
+	if not _hasFS or not CAutoloadFile then return end
+	local exists = isfile(CAutoloadFile)
+	print("[RV] _loadMeta : autoload.json existe=" .. tostring(exists))
+	if not exists then return end
+	local ok, data = pcall(function()
+		return HttpService:JSONDecode(readfile(CAutoloadFile))
 	end)
+	print("[RV] _loadMeta : parse ok=" .. tostring(ok) .. " data=" .. tostring(type(data) == "table" and data.autoLoadSlot or "nil"))
+	if not ok or type(data) ~= "table" then return end
+	CAutoLoadSlot = (type(data.autoLoadSlot) == "string" and data.autoLoadSlot ~= "") and data.autoLoadSlot or nil
+	print("[RV] _loadMeta : CAutoLoadSlot=" .. tostring(CAutoLoadSlot))
 end
 
 local RayfieldLibrary = {
@@ -758,7 +780,6 @@ local correctBuild = false
 local warned
 local globalLoaded
 local rayfieldDestroyed = false -- True when RayfieldLibrary:Destroy() is called
-local _pendingRestore = {} -- Flag -> valeur sauvegardée, en attente que le composant soit créé
 
 -- ════════════════════════════════════════════════════════════════════════════
 --  SIDE TAB MODE — activé via SideTabs = true dans CreateWindow
@@ -960,11 +981,15 @@ LoadingFrame.Version.Text = Release
 -- Thanks to Latte Softworks for the Lucide integration for Roblox
 local Icons = useStudio and require(script.Parent.icons) or loadWithTimeout('https://raw.githubusercontent.com/SiriusSoftwareLtd/Rayfield/refs/heads/main/icons.lua')
 -- Variables
+-- CActiveSlot, CEnabled, CAutoLoadSlot, _hasFS, _pendingTheme déclarés en haut du fichier
 
-local CActiveSlot    = nil    -- nom du slot actif (string, sans extension)
-local CEnabled       = false  -- ConfigurationSaving.Enabled
-local CAutoLoad      = false  -- auto-load au lancement (5s)
-local CAutoLoadConn  = nil    -- connexion task.delay auto-load
+-- ── UI READY DETECTOR ────────────────────────────────────────────────────────
+local _lastComponentTime = 0
+local UI_READY_DELAY     = 0.5
+local _uiReadyFired      = false
+local function _onComponentCreated()
+	_lastComponentTime = tick()
+end
 local Minimised = false
 local Hidden = false
 local Debounce = false
@@ -1023,10 +1048,22 @@ end
 local SelectedTheme = RayfieldLibrary.Theme.Default
 
 ChangeTheme = function(Theme)
+	print("[RV] ChangeTheme appelé | Theme=" .. tostring(Theme) .. " type=" .. type(Theme))
 	if typeof(Theme) == 'string' then
-		SelectedTheme = RayfieldLibrary.Theme[Theme]
+		local resolved = RayfieldLibrary.Theme[Theme]
+		print("[RV] ChangeTheme : resolved=" .. tostring(resolved ~= nil))
+		if not resolved then
+			local available = {}
+			for k, _ in pairs(RayfieldLibrary.Theme) do table.insert(available, k) end
+			print("[RV] ChangeTheme : thèmes disponibles=" .. table.concat(available, ", "))
+			warn("[RV] ChangeTheme : thème introuvable → " .. tostring(Theme))
+			error("theme not found")
+		end
+		SelectedTheme = resolved
+		_currentThemeName = Theme  -- on stocke le nom directement
 	elseif typeof(Theme) == 'table' then
 		SelectedTheme = Theme
+		-- thème custom sans nom — on garde le nom précédent
 	end
 
 	-- Synchronise VC avec le thème courant (composants VoidUI custom)
@@ -1347,10 +1384,9 @@ local function LoadConfiguration(rawContent)
 	local errors = {}
 
 	for FlagName, FlagValue in pairs(Data) do
-		_pendingRestore[FlagName] = FlagValue
 		local Flag = RayfieldLibrary.Flags[FlagName]
 		if Flag then
-			-- Synchrone : on applique immédiatement et on track les erreurs correctement
+			-- Flag trouvé → on applique
 			local applyOk = pcall(function()
 				if Flag.Type == "ColorPicker" then
 					Flag:Set(UnpackColor(FlagValue))
@@ -1361,39 +1397,25 @@ local function LoadConfiguration(rawContent)
 				elseif Flag.Type == "CardGrid" or Flag.Type == "FilteredCardGrid" then
 					if Flag.SetSelected and type(FlagValue) == "table" then Flag:SetSelected(FlagValue) end
 				else
-					Flag:Set(FlagValue) -- toujours appeler Set, même si valeur identique
+					Flag:Set(FlagValue)
 				end
 			end)
 			if not applyOk then
+				-- Vrai bug : le flag existe mais Set() a planté
 				table.insert(errors, FlagName)
 			end
-		else
-			-- Flag absent du script (script mis à jour, flag supprimé)
-			table.insert(errors, FlagName)
 		end
+		-- Flag absent → MàJ du jeu, composant supprimé — on ignore silencieusement
 	end
 
 	return true, errors
-end
--- Applique une valeur en attente à un composant qui vient d'être créé dynamiquement
-local function _applyPendingRestore(flagName, obj)
-	local val = _pendingRestore[flagName]
-	if val == nil then return end
-	task.defer(function() -- defer pour laisser le composant finir son init
-		if obj.Type == "ProgressBar" then
-			if obj.SetValue then obj:SetValue(tonumber(val) or 0) end
-		elseif obj.Type == "MultiToggle" then
-			if obj.SetValue and type(val) == "table" then obj:SetValue(val) end
-		elseif obj.Type == "CardGrid" or obj.Type == "FilteredCardGrid" then
-			if obj.SetSelected and type(val) == "table" then obj:SetSelected(val) end
-		end
-	end)
 end
 
 -- Sauvegarde le slot donné (ou CActiveSlot) avec snapshot complet des flags.
 -- Si le fichier existe déjà il est écrasé (clear + write).
 local function SaveConfiguration(slotName)
 	if not CEnabled then return end
+	if not _hasFS then return end
 	slotName = slotName or CActiveSlot
 	if not slotName or slotName == "" then
 		warn("RayVoid | SaveConfiguration : aucun slot actif.")
@@ -1425,8 +1447,7 @@ local function SaveConfiguration(slotName)
 		flags   = flags,
 	})
 
-	ensureFolder(RAYVOID_BASE)
-	ensureFolder(CPlaceFolder)
+	-- Les dossiers sont garantis par FILESYSTEM INIT — on écrit directement
 	local path = CPlaceFolder .. "/" .. slotName .. ConfigurationExtension
 	callSafely(writefile, path, payload)
 
@@ -1879,7 +1900,44 @@ function RayfieldLibrary:CreateWindow(Settings)
 	end
 
 	ensureFolder(RayfieldFolder)
-	ensureFolder(VoidPrefsFolder)
+
+	-- ════════════════════════════════════════════════════════════════════
+	--  FILESYSTEM INIT — toujours exécuté, indépendant de ConfigurationSaving
+	--  Garantit que RAYVOID/ et RAYVOID/{PlaceId}/ existent avant tout
+	-- ════════════════════════════════════════════════════════════════════
+	print("[RV] makefolder=" .. type(makefolder) .. " isfile=" .. type(isfile) .. " writefile=" .. type(writefile) .. " readfile=" .. type(readfile) .. " isfolder=" .. type(isfolder))
+
+	_hasFS = type(makefolder) == "function"
+	       and type(isfile) == "function"
+	       and type(writefile) == "function"
+	       and type(readfile) == "function"
+
+	print("[RV] _hasFS=" .. tostring(_hasFS))
+
+	if _hasFS then
+		print("[RV] FILESYSTEM INIT start")
+		-- 1. Dossier racine RAYVOID/
+		local rayvoidExists = _isfolder(RAYVOID_BASE)
+		print("[RV] RAYVOID/ existe=" .. tostring(rayvoidExists))
+		if not rayvoidExists then
+			local ok, err = pcall(makefolder, RAYVOID_BASE)
+			print("[RV] makefolder(RAYVOID) ok=" .. tostring(ok) .. " err=" .. tostring(err))
+		end
+		-- 2. Dossier du jeu courant RAYVOID/{PlaceId}/
+		CPlaceFolder = RAYVOID_BASE .. "/" .. tostring(game.PlaceId)
+		local placeExists = _isfolder(CPlaceFolder)
+		print("[RV] " .. CPlaceFolder .. " existe=" .. tostring(placeExists))
+		if not placeExists then
+			local ok, err = pcall(makefolder, CPlaceFolder)
+			print("[RV] makefolder(PlaceFolder) ok=" .. tostring(ok) .. " err=" .. tostring(err))
+		end
+		-- 3. Fichier auto-load propre à ce jeu
+		CAutoloadFile = CPlaceFolder .. "/autoload.json"
+		print("[RV] CAutoloadFile=" .. CAutoloadFile)
+	else
+		print("[RV] FILESYSTEM INIT skipped — _hasFS false")
+	end
+
 	_loadVoidPrefs()
 
 	Main.Size = UDim2.new(0, 420, 0, 100)
@@ -1901,6 +1959,12 @@ function RayfieldLibrary:CreateWindow(Settings)
 
 	if Settings.LoadingTitle ~= "Rayfield Interface Suite" then
 		LoadingFrame.Version.Text = "Rayfield UI"
+	end
+
+	-- Titre de la topbar : priorité à Settings.Name, sinon nom de script défini via SetScriptName
+	local _topbarTitle = Settings.Name or _voidScriptName
+	if _topbarTitle and _topbarTitle ~= "" then
+		Topbar.Title.Text = _topbarTitle
 	end
 
 	if Settings.Icon and Settings.Icon ~= 0 and Topbar:FindFirstChild('Icon') then
@@ -1941,27 +2005,31 @@ function RayfieldLibrary:CreateWindow(Settings)
 	LoadingFrame.Visible = true
 
 
+	-- Lecture des settings ConfigurationSaving
 	pcall(function()
-		if not Settings.ConfigurationSaving.FileName then
-			Settings.ConfigurationSaving.FileName = tostring(game.PlaceId)
+		local cfgSave = Settings.ConfigurationSaving
+		if type(cfgSave) ~= "table" then return end
+
+		if cfgSave.Enabled == nil then
+			cfgSave.Enabled = false
 		end
 
-		if Settings.ConfigurationSaving.Enabled == nil then
-			Settings.ConfigurationSaving.Enabled = false
-		end
+		CEnabled = cfgSave.Enabled == true
 
-		CActiveSlot = Settings.ConfigurationSaving.FileName or nil  -- slot par défaut optionnel
-		CEnabled = Settings.ConfigurationSaving.Enabled
-
-		if Settings.ConfigurationSaving.Enabled then
-			-- Structure : RAYVOID/{PlaceId}/
-			CPlaceFolder = RAYVOID_BASE .. "/" .. tostring(game.PlaceId)
-			CMetaFile    = CPlaceFolder .. "/.meta.json"
-			ensureFolder(RAYVOID_BASE)
-			ensureFolder(CPlaceFolder)
-			_loadMeta()  -- récupère CAutoLoad et CActiveSlot sauvegardés
+		if CEnabled then
+			-- Slot par défaut = FileName si fourni, sinon PlaceId en string
+			if not cfgSave.FileName or cfgSave.FileName == "" then
+				cfgSave.FileName = tostring(game.PlaceId)
+			end
+			CActiveSlot = cfgSave.FileName
 		end
 	end)
+
+	-- autoload.json — lu toujours, indépendant de ConfigurationSaving
+	-- CAutoloadFile est garanti set par le bloc FILESYSTEM INIT ci-dessus
+	if _hasFS then
+		_loadMeta()
+	end
 
 
 	makeDraggable(Main, Topbar, false, {dragOffset, dragOffsetMobile})
@@ -2433,6 +2501,7 @@ function RayfieldLibrary:CreateWindow(Settings)
 			if Settings.ConfigurationSaving then
 				if Settings.ConfigurationSaving.Enabled and ColorPickerSettings.Flag then
 					RayfieldLibrary.Flags[ColorPickerSettings.Flag] = ColorPickerSettings
+					_onComponentCreated()
 				end
 			end
 
@@ -2695,6 +2764,7 @@ function RayfieldLibrary:CreateWindow(Settings)
 			if Settings.ConfigurationSaving then
 				if Settings.ConfigurationSaving.Enabled and InputSettings.Flag then
 					RayfieldLibrary.Flags[InputSettings.Flag] = InputSettings
+					_onComponentCreated()
 				end
 			end
 
@@ -3036,6 +3106,7 @@ function RayfieldLibrary:CreateWindow(Settings)
 			if Settings.ConfigurationSaving then
 				if Settings.ConfigurationSaving.Enabled and DropdownSettings.Flag then
 					RayfieldLibrary.Flags[DropdownSettings.Flag] = DropdownSettings
+					_onComponentCreated()
 				end
 			end
 
@@ -3165,6 +3236,7 @@ function RayfieldLibrary:CreateWindow(Settings)
 			if Settings.ConfigurationSaving then
 				if Settings.ConfigurationSaving.Enabled and KeybindSettings.Flag then
 					RayfieldLibrary.Flags[KeybindSettings.Flag] = KeybindSettings
+					_onComponentCreated()
 				end
 			end
 
@@ -3317,6 +3389,7 @@ function RayfieldLibrary:CreateWindow(Settings)
 				if Settings.ConfigurationSaving then
 					if Settings.ConfigurationSaving.Enabled and ToggleSettings.Flag then
 						RayfieldLibrary.Flags[ToggleSettings.Flag] = ToggleSettings
+						_onComponentCreated()
 					end
 				end
 			end
@@ -3498,6 +3571,7 @@ function RayfieldLibrary:CreateWindow(Settings)
 			if Settings.ConfigurationSaving then
 				if Settings.ConfigurationSaving.Enabled and SliderSettings.Flag then
 					RayfieldLibrary.Flags[SliderSettings.Flag] = SliderSettings
+					_onComponentCreated()
 				end
 			end
 
@@ -3587,7 +3661,7 @@ function RayfieldLibrary:CreateWindow(Settings)
 
 			if cfg.Flag then
 				RayfieldLibrary.Flags[cfg.Flag] = progressObj
-				_applyPendingRestore(cfg.Flag, progressObj)
+				_onComponentCreated()
 			end
 
 			return progressObj
@@ -3600,6 +3674,7 @@ function RayfieldLibrary:CreateWindow(Settings)
 			local cols     = cfg.Columns  or 3
 			local callback = cfg.Callback or function() end
 			local selected = {}
+			local cardSetters = {}  -- nom → SetCardSelected, pour SetSelected
 
 			local cardH = 115
 			local gap   = 8
@@ -3668,7 +3743,7 @@ function RayfieldLibrary:CreateWindow(Settings)
 
 				local isSelected = false
 
-				local function SetCardSelected(v)
+				local function SetCardSelected(v, silent)
 					isSelected = v
 					if v then
 						selected[item.Name] = true
@@ -3684,8 +3759,13 @@ function RayfieldLibrary:CreateWindow(Settings)
 						VTween(checkBg,     { BackgroundTransparency = 1 },           0.2)
 						VTween(nameLabel,   { TextColor3 = VC.TextMid },              0.2)
 					end
-					callback(selected)
+					if not silent then
+						callback(selected)
+					end
 				end
+
+				-- Stocke le setter pour SetSelected (restore config)
+				cardSetters[item.Name] = SetCardSelected
 
 				clickZone.MouseEnter:Connect(function()
 					if not isSelected then
@@ -3716,16 +3796,19 @@ function RayfieldLibrary:CreateWindow(Settings)
 				GetSelected = function() return selected end,
 				SetSelected = function(_, data)
 					if type(data) ~= "table" then return end
+					-- On applique visuellement chaque card puis on fire le callback une seule fois
 					for _, item in ipairs(items) do
-						if data[item.Name] then
-							selected[item.Name] = true
+						local setter = cardSetters[item.Name]
+						if setter then
+							setter(data[item.Name] == true, true)  -- silent=true : pas de callback par card
 						end
 					end
+					callback(selected)  -- callback unique après tout le restore
 				end,
 			}
 			if cfg.Flag then
 				RayfieldLibrary.Flags[cfg.Flag] = cardObj
-				_applyPendingRestore(cfg.Flag, cardObj)
+				_onComponentCreated()
 			end
 			return cardObj
 		end
@@ -4031,6 +4114,7 @@ function RayfieldLibrary:CreateWindow(Settings)
 						globalSelected[k] = v or nil
 					end
 					BuildGrid(currentGroup)
+					callback(globalSelected)  -- fire le callback pour mettre à jour le script
 				end,
 				SelectAll = function(_, groupLabel)
 					local grp = groupIndex[groupLabel or currentGroup]
@@ -4049,7 +4133,7 @@ function RayfieldLibrary:CreateWindow(Settings)
 			}
 			if cfg.Flag then
 				RayfieldLibrary.Flags[cfg.Flag] = fcgObj
-				_applyPendingRestore(cfg.Flag, fcgObj)
+				_onComponentCreated()
 			end
 			return fcgObj
 		end
@@ -4159,7 +4243,7 @@ function RayfieldLibrary:CreateWindow(Settings)
 			}
 			if cfg.Flag then
 				RayfieldLibrary.Flags[cfg.Flag] = mtObj
-				_applyPendingRestore(cfg.Flag, mtObj)
+				_onComponentCreated()
 			end
 			return mtObj
 		end
@@ -4382,15 +4466,30 @@ function RayfieldLibrary:CreateWindow(Settings)
 
 		SettingsTab:CreateDivider()
 
-		-- Auto-load (5 secondes après le lancement)
-		SettingsTab:CreateToggle({
-			Name         = 'Auto-load au lancement (5s)',
-			CurrentValue = CAutoLoad,
-			Callback     = function(val)
-				CAutoLoad = val
+		-- Auto-load : dropdown pour choisir quel slot charger au lancement
+		local autoLoadOptions = {"(désactivé)"}
+		for _, s in ipairs(_listConfigs()) do table.insert(autoLoadOptions, s) end
+
+		local autoLoadDropdown = SettingsTab:CreateDropdown({
+			Name          = 'Auto-load au lancement',
+			Options       = autoLoadOptions,
+			CurrentOption = {CAutoLoadSlot or "(désactivé)"},
+			Callback      = function(sel)
+				local chosen = sel[1] or sel
+				CAutoLoadSlot = (chosen == "(désactivé)") and nil or chosen
 				_saveMeta()
 			end,
 		})
+
+		-- Refresh du dropdown auto-load quand on crée/supprime une config
+		local _origRefresh = _refreshSlotDropdown
+		_refreshSlotDropdown = function()
+			_origRefresh()
+			local opts = {"(désactivé)"}
+			for _, s in ipairs(_listConfigs()) do table.insert(opts, s) end
+			autoLoadDropdown:Refresh(opts)
+			autoLoadDropdown:Set({CAutoLoadSlot or "(désactivé)"})
+		end
 	end  -- CEnabled
 
 	SettingsTab:CreateSection('Apparence')
@@ -4412,8 +4511,11 @@ function RayfieldLibrary:CreateWindow(Settings)
 		CurrentOption = {currentThemeName},
 		Flag = 'SettingsTheme',
 		Callback = function(selected)
+			print("[RV] Dropdown thème callback | selected type=" .. type(selected) .. " val=" .. tostring(type(selected) == "table" and selected[1] or selected))
 			local name = selected[1] or selected
-			local ok = pcall(ChangeTheme, name)
+			print("[RV] Dropdown thème : name=" .. tostring(name))
+			local ok, err = pcall(ChangeTheme, name)
+			print("[RV] Dropdown thème : ChangeTheme ok=" .. tostring(ok) .. " err=" .. tostring(err))
 			if not ok then
 				RayfieldLibrary:Notify({Title = 'Thème introuvable', Content = 'Impossible de charger le thème "'..tostring(name)..'".'})
 			end
@@ -4637,7 +4739,7 @@ function RayfieldLibrary:LoadConfiguration(slotName)
 	end
 	if not CPlaceFolder then return end
 
-	if not isfile then
+	if not _hasFS then
 		RayfieldLibrary:Notify({Title = "Config", Content = "Ton executor ne supporte pas le filesystem.", Duration = 5, Image = 4400704299})
 		return
 	end
@@ -4656,7 +4758,7 @@ function RayfieldLibrary:LoadConfiguration(slotName)
 
 	local ok, errors = LoadConfiguration(raw)
 	if not ok then
-		-- errors[1] contient le message d'erreur (JSON invalide, placeId mismatch)
+		-- Erreur structurelle : JSON invalide ou PlaceId mismatch
 		RayfieldLibrary:Notify({Title = slotName .. " — erreur", Content = errors[1] or "Erreur inconnue.", Duration = 6, Image = 4400704299})
 		return
 	end
@@ -4664,19 +4766,12 @@ function RayfieldLibrary:LoadConfiguration(slotName)
 	CActiveSlot = slotName
 	_saveMeta()
 
-	-- Notification unique
 	if #errors == 0 then
-		RayfieldLibrary:Notify({Title = slotName .. " chargé", Content = "Aucune erreur.", Duration = 4, Image = 4384403532})
+		-- Tout s'est bien passé
+		RayfieldLibrary:Notify({Title = slotName .. " chargé", Content = "Config restaurée.", Duration = 3, Image = 4384403532})
 	else
-		-- Une notif par flag raté (script mis à jour, flag supprimé)
-		for _, flagName in ipairs(errors) do
-			RayfieldLibrary:Notify({Title = slotName .. " — flag manquant", Content = "\"" .. tostring(flagName) .. "\" introuvable dans le script.", Duration = 5, Image = 4400704299})
-		end
-		if #errors == 1 then
-			-- Déjà notifié ci-dessus
-		else
-			RayfieldLibrary:Notify({Title = slotName .. " chargé", Content = #errors .. " flag(s) manquant(s) — voir les notifications.", Duration = 4, Image = 4384403532})
-		end
+		-- Des Set() ont planté — vrai bug, pas des flags simplement absents
+		RayfieldLibrary:Notify({Title = slotName .. " — erreur partielle", Content = #errors .. " flag(s) n'ont pas pu être restaurés.", Duration = 5, Image = 4400704299})
 	end
 
 	globalLoaded = true
@@ -4920,15 +5015,38 @@ task.delay(4, function()
 	end
 end)
 
--- Auto-load : attend 5 secondes puis charge CActiveSlot si CAutoLoad est activé
-if CEnabled and CAutoLoad and CActiveSlot then
-	task.delay(5, function()
-		if not rayfieldDestroyed and CAutoLoad and CActiveSlot then
-			RayfieldLibrary:Notify({Title = 'Auto-load', Content = 'Chargement de "' .. CActiveSlot .. '" dans 0 s...', Duration = 2})
-			RayfieldLibrary:LoadConfiguration(CActiveSlot)
+-- ── UI READY WATCHER — thème et auto-load déclenchés quand l'UI est construite
+-- Détecte le silence de UI_READY_DELAY secondes sans nouveau composant créé.
+task.spawn(function()
+	-- Attendre qu'au moins un composant ait été enregistré (UI a commencé à se construire)
+	while _lastComponentTime == 0 do
+		task.wait(0.1)
+		if rayfieldDestroyed then return end
+	end
+	-- Puis attendre le silence
+	while true do
+		task.wait(0.1)
+		if rayfieldDestroyed then return end
+		if tick() - _lastComponentTime >= UI_READY_DELAY then
+			if _uiReadyFired then break end
+			_uiReadyFired = true
+
+			-- 1. Appliquer le thème sauvegardé (nécessite l'UI construite)
+			if _pendingTheme then
+				pcall(ChangeTheme, _pendingTheme)
+				_pendingTheme = nil
+			end
+
+			-- 2. Auto-load si un slot est configuré
+			if CEnabled and CAutoLoadSlot then
+				RayfieldLibrary:Notify({Title = 'Auto-load', Content = 'Chargement de "' .. CAutoLoadSlot .. '"...', Duration = 2})
+				RayfieldLibrary:LoadConfiguration(CAutoLoadSlot)
+			end
+
+			break
 		end
-	end)
-end
+	end
+end)
 
 -- ════════════════════════════════════════════════════════════════════════════
 --  FLOATING BUTTON — bouton flottant draggable indépendant de la fenêtre
@@ -5330,6 +5448,21 @@ local _voidSessionId  = nil
 
 function RayfieldLibrary:SetScriptName(name)
 	_voidScriptName = name or "Rayfield"
+	-- Si la topbar existe déjà (SetScriptName appelé après CreateWindow), on la met à jour
+	pcall(function()
+		if Rayfield and Rayfield.Main and Rayfield.Main.Topbar and Rayfield.Main.Topbar:FindFirstChild("Title") then
+			Rayfield.Main.Topbar.Title.Text = _voidScriptName
+		end
+	end)
+end
+
+-- Change uniquement le titre affiché dans la topbar, sans toucher au nom analytics
+function RayfieldLibrary:SetTitle(title)
+	pcall(function()
+		if Rayfield and Rayfield.Main and Rayfield.Main.Topbar and Rayfield.Main.Topbar:FindFirstChild("Title") then
+			Rayfield.Main.Topbar.Title.Text = title or _voidScriptName
+		end
+	end)
 end
 
 function RayfieldLibrary:SetPremium(val)  -- ← ajouter ici
