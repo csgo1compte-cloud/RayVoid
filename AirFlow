@@ -82,7 +82,7 @@ local function H()
     end
     local b,a=pcall(function()
         -- Set Airflow.IconsURL before creating a window to load our own copy of Icons.lua.
-        local a=game:HttpGet(d.IconsURL or"https://raw.githubusercontent.com/Footagesus/Icons/refs/heads/main/lucide/dist/Icons.lua")
+        local a=game:HttpGet(d.IconsURL or"https://raw.githubusercontent.com/csgo1compte-cloud/RayVoid/refs/heads/main/Icone")
         return loadstring(a)()
     end)
     if b and type(a)=="table"then
