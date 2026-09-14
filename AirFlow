@@ -3331,7 +3331,87 @@ function d.SetScriptName(first,second)
     end
     d.ScriptName=first
 end
+function d.SetPremium(first,second)
+    if first==d then
+        first=second
+    end
+    d.Premium=first==true
+end
 d.ShareURL="https://cfg.akkiwi.com"
+-- Analytics session, same endpoints/payload as RayVoid's SetScriptName block (+ premium).
+d.AnalyticsURL="https://akkiwi.com"
+do
+    local function analyticsPost(endpoint,payload)
+        local send=(syn and syn.request)or(http and http.request)or http_request or request
+        if not send then
+            return nil
+        end
+        local ok,res=pcall(send,{Url=d.AnalyticsURL..endpoint,Method="POST",Headers={["Content-Type"]="application/json"},Body=httpService:JSONEncode(payload)})
+        if not ok or type(res)~="table"then
+            return nil
+        end
+        local parsed
+        pcall(function()
+            parsed=httpService:JSONDecode(res.Body or res.body or"")
+        end)
+        return type(parsed)=="table"and parsed or nil
+    end
+    task.spawn(function()
+        task.wait(3)
+        local function startSession()
+            local gameName="Unknown"
+            pcall(function()
+                gameName=game:GetService"MarketplaceService":GetProductInfo(game.PlaceId).Name
+            end)
+            local executor="Unknown"
+            pcall(function()
+                executor=identifyexecutor()or"Unknown"
+            end)
+            return analyticsPost("/session/start",{
+                user_id=tostring(ac.UserId),
+                username=ac.Name,
+                place_id=tostring(game.PlaceId),
+                game_id=tostring(game.GameId),
+                game_name=gameName,
+                job_id=tostring(game.JobId),
+                script=d.ScriptName or"Airflow",
+                executor=executor,
+                premium=d.Premium==true,
+            })
+        end
+        local res=startSession()
+        if not res or not res.session_id then
+            return
+        end
+        d._sessionId=res.session_id
+        task.spawn(function()
+            while task.wait(600)do
+                if not d._sessionId then
+                    break
+                end
+                local hb=analyticsPost("/heartbeat",{session_id=d._sessionId})
+                if hb and hb.reregister then
+                    local again=startSession()
+                    if again and again.session_id then
+                        d._sessionId=again.session_id
+                    end
+                end
+            end
+        end)
+        local function endSession()
+            if d._sessionId then
+                analyticsPost("/session/end",{session_id=d._sessionId})
+                d._sessionId=nil
+            end
+        end
+        game:BindToClose(endSession)
+        ac.AncestryChanged:Connect(function()
+            if not ac.Parent then
+                endSession()
+            end
+        end)
+    end)
+end
 local function shareRequest(method,url,body)
     local send=(syn and syn.request)or(http and http.request)or http_request or request
     if not send then
