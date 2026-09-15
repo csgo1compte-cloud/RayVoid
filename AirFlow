@@ -3664,6 +3664,10 @@ function g:_buildMainTab(opts)
     tab:Section"Community"
     tab:Paragraph{Name="Join the Discord",Content="New scripts, updates, sneak peeks and script requests all happen here. Found a bug or want a script updated? Open a ticket on the Discord."}
     copyButton("Copy Discord invite",discord,"message-circle",true)
+    tab:Section"Support me"
+    tab:Paragraph{Name="Want to support me?",Content="My scripts will always stay free. If you enjoy them and want to support my work, you can make a donation — every bit helps, thank you!"}
+    copyButton("Copy PayPal link",opts.PayPal or"https://paypal.me/Akkiwi","heart")
+    copyButton("Copy Solana (SOL) address",opts.Solana or"3kj4auRyaqcW2PQ8MYFBcEEueV6PXUhdntYNBEHqYpzZ","wallet")
     tab:Section"My script pages"
     for _,link in ipairs(links)do
         copyButton("Copy "..tostring(link.Name or link.name).." link",tostring(link.Url or link.url),"link")
