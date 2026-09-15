@@ -494,7 +494,7 @@ function j:Divider()
 end
 function j:Label(a)
     a=k(a,{Name="Text",Title="Text"})
-    local c=f{Size=UDim2.new(1,0,0,18),Text=a.Text or"",TextSize=13,FontFace=i.Regular,TextColor3=a.Color or b.Muted,LayoutOrder=self:_nextOrder(),Parent=self.List}
+    local c=f{Size=UDim2.new(1,0,0,18),Text=a.Text or"",TextSize=13,FontFace=i.Regular,TextColor3=a.Color or b.Muted,RichText=true,LayoutOrder=self:_nextOrder(),Parent=self.List}
     t(c,2)
     local d={Set=function(b,a)
         c.Text=tostring(a)
@@ -526,16 +526,26 @@ function j:Label(a)
 end
 function j:Paragraph(a)
     a=k(a,{Title="Name"})
-    local d=B(self,"Frame",0,a)
+    local d,stroke=B(self,"Frame",0,a)
+    if typeof(a.Color)=="Color3"then
+        stroke.Color=a.Color
+    end
     d.AutomaticSize=Enum.AutomaticSize.Y
     t(d,14,14,11,12)
     c("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,4),Parent=d})
-    f{Size=UDim2.new(1,0,0,14),Text=a.Name or"",LayoutOrder=1,Parent=d}
-    local e=f{Size=UDim2.new(1,0,0,0),AutomaticSize=Enum.AutomaticSize.Y,Text=a.Content or"",TextSize=13,FontFace=i.Regular,TextColor3=b.Muted,TextWrapped=true,TextTruncate=Enum.TextTruncate.None,TextYAlignment=Enum.TextYAlignment.Top,LayoutOrder=2,Parent=d}
+    local title=f{Size=UDim2.new(1,0,0,14),Text=a.Name or"",RichText=true,LayoutOrder=1,Parent=d}
+    local e=f{Size=UDim2.new(1,0,0,0),AutomaticSize=Enum.AutomaticSize.Y,Text=a.Content or"",TextSize=13,FontFace=i.Regular,TextColor3=b.Muted,TextWrapped=true,TextTruncate=Enum.TextTruncate.None,TextYAlignment=Enum.TextYAlignment.Top,RichText=true,LayoutOrder=2,Parent=d}
+    -- :Set(text) or RayVoid's :Set{Title, Content}
     return n(self,a,{Set=function(b,a)
-        e.Text=a
+        if type(a)=="table"then
+            if a.Title~=nil then title.Text=tostring(a.Title)end
+            if a.Content~=nil then e.Text=tostring(a.Content)end
+        else
+            e.Text=tostring(a)
+        end
     end},d,"Paragraph")
 end
+j.RichParagraph=j.Paragraph
 function j:Button(d)
     d=k(d,{Title="Name",Description="Desc"})
     local e=d.Style=="Primary"
@@ -3404,7 +3414,6 @@ do
                 d._sessionId=nil
             end
         end
-        game:BindToClose(endSession)
         ac.AncestryChanged:Connect(function()
             if not ac.Parent then
                 endSession()
@@ -3653,8 +3662,8 @@ function g:_buildMainTab(opts)
         tab:Paragraph{Name="Your executor may cause errors",Content="Join the Discord to find an executor that works with my scripts."}
     end
     tab:Section"AKkiwi Scripts"
-    tab:Label{Text="100% FREE & KEYLESS — ALWAYS",Color=b.Success}
-    tab:Paragraph{Name="Asked for a key? You got scammed.",Content="Every script I make is free and keyless. No paywalls, no offerwalls, no keys."}
+    tab:Label{Text="<b>100% FREE &amp; KEYLESS — ALWAYS</b>",Color=b.Success}
+    tab:Paragraph{Name='<font color="#FF6B6B"><b>Asked for a key? You got SCAMMED.</b></font>',Content="Every script I make is free and keyless. No paywalls, no offerwalls, no keys."}
     local function copyButton(name,url,icon,primary)
         tab:Button{Name=name,Desc=(url:gsub("^https://","")),Icon=icon,Style=primary and"Primary"or nil,Callback=function()
             local copied=pcall(setclipboard,url)
@@ -3662,10 +3671,10 @@ function g:_buildMainTab(opts)
         end}
     end
     tab:Section"Community"
-    tab:Paragraph{Name="Join the Discord",Content="New scripts, updates, sneak peeks and script requests all happen here. Found a bug or want a script updated? Open a ticket on the Discord."}
+    tab:Paragraph{Name='<font color="#8AA0FF">Join the Discord</font>',Color=Color3.fromRGB(120,140,255),Content='New scripts, updates, sneak peeks and script requests all happen here.\n<font color="#FFC466">Found a bug or want a script updated? Open a ticket on the Discord.</font>'}
     copyButton("Copy Discord invite",discord,"message-circle",true)
     tab:Section"Support me"
-    tab:Paragraph{Name="Want to support me?",Content="My scripts will always stay free. If you enjoy them and want to support my work, you can make a donation — every bit helps, thank you!"}
+    tab:Paragraph{Name='<font color="#FF78A0">Want to support me?</font>',Color=Color3.fromRGB(255,120,160),Content="My scripts will always stay free. If you enjoy them and want to support my work, you can make a donation — every bit helps, thank you!"}
     copyButton("Copy PayPal link",opts.PayPal or"https://paypal.me/Akkiwi","heart")
     copyButton("Copy Solana (SOL) address",opts.Solana or"3kj4auRyaqcW2PQ8MYFBcEEueV6PXUhdntYNBEHqYpzZ","wallet")
     tab:Section"My script pages"
