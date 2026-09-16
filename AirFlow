@@ -1192,9 +1192,14 @@ function j:Input(f)
         end
         m(f.Callback,d.Text,c)
     end)
-    return n(self,f,{Set=function(b,a)
+    -- AKkiwi: Set must honour the (value, silent) contract like every other control — without this
+    -- a config load filled the box but never told the script, so the value looked set and was not.
+    return n(self,f,{Set=function(b,a,silent)
         d.Text=tostring(a)
         w(p)
+        if not silent then
+            m(f.Callback,d.Text,false)
+        end
     end,Get=function()
         return d.Text
     end},k,"Input")
