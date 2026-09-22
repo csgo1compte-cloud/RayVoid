@@ -101,7 +101,9 @@ local function H()
     end
     return z
 end
-local ad={ValleySans={Regular="https://raw.githubusercontent.com/HelsinkiTypeStudio/valley-sans/main/fonts/ttf/ValleySans-Regular.ttf",Medium="https://raw.githubusercontent.com/HelsinkiTypeStudio/valley-sans/main/fonts/ttf/ValleySans-Medium.ttf",SemiBold="https://raw.githubusercontent.com/HelsinkiTypeStudio/valley-sans/main/fonts/ttf/ValleySans-SemiBold.ttf"}}
+-- AKkiwi: the upstream repo no longer ships TTFs (sources only), so the static TTFs from Google Fonts
+-- are hosted with our fork (OFL, licence file alongside).
+local ad={ValleySans={Regular="https://raw.githubusercontent.com/csgo1compte-cloud/RayVoid/refs/heads/main/fonts/ValleySans-Regular.ttf",Medium="https://raw.githubusercontent.com/csgo1compte-cloud/RayVoid/refs/heads/main/fonts/ValleySans-Medium.ttf",SemiBold="https://raw.githubusercontent.com/csgo1compte-cloud/RayVoid/refs/heads/main/fonts/ValleySans-SemiBold.ttf"}}
 local T={Regular={400,Enum.FontWeight.Regular},Medium={500,Enum.FontWeight.Medium},SemiBold={600,Enum.FontWeight.SemiBold},Bold={700,Enum.FontWeight.Bold}}
 function d:LoadFont(b)
     local f="function"
@@ -127,9 +129,19 @@ function d:LoadFont(b)
         local c=T[b]
         if c then
             local f,g=e.."/"..a.."-"..b..".ttf",true
-            if not isfile(f)then
+            -- AKkiwi: never trust the cache blindly. A 404 page saved as .ttf used to stick forever
+            -- (isfile was the only check), so both the cached file and a fresh download must look like a TrueType font.
+            local function isTTF(data)
+                return type(data)=="string"and#data>1000 and data:sub(1,4)=="\0\1\0\0"
+            end
+            local cached=isfile(f)and select(2,pcall(readfile,f))
+            if not isTTF(cached)then
                 g=pcall(function()
-                    writefile(f,game:HttpGet(d))
+                    local data=game:HttpGet(d)
+                    if not isTTF(data)then
+                        error("not a font")
+                    end
+                    writefile(f,data)
                 end)
             end
             if g then
@@ -2082,6 +2094,12 @@ end
 local g={}
 g.__index=g
 function d.Window(Z,m)
+    -- AKkiwi: LoadFont existed but nothing called it, so the UI always fell back to Builder Sans. Load Valley Sans once,
+    -- before this window creates any text (components read the shared d.Fonts table). Opt out with Airflow.AutoFont = false.
+    if d.AutoFont~=false and not d._fontTried then
+        d._fontTried=true
+        pcall(d.LoadFont,d,{Name="ValleySans"})
+    end
     local E,o,G,M,H="AirflowUI","Frame","CanvasGroup","UIListLayout","AbsoluteSize"
     m=k(m,{Name="Title",LoadingSubtitle="Subtitle",ToggleUIKeybind="Keybind"})
     if type(m.Keybind)=="string"then
@@ -2314,6 +2332,15 @@ function g:_overControl(a)
     end
     return false
 end
+-- touch on a scrollable list must scroll it, not drag the window
+function g:_overScroller(point)
+    for _,frame in ipairs(self.Body:GetDescendants())do
+        if frame:IsA"ScrollingFrame"and frame.ScrollingEnabled and P(point,frame)and aj(frame,self.Body,point)then
+            return true
+        end
+    end
+    return false
+end
 function g:_enableDrag()
     local a=false
     local c=Vector2.zero
@@ -2331,6 +2358,9 @@ function g:_enableDrag()
         end
         local b=q()
         if not P(b,self.Body)or self:_overControl(b)then
+            return
+        end
+        if e.UserInputType==Enum.UserInputType.Touch and self:_overScroller(b)then
             return
         end
         a=true
