@@ -3721,4 +3721,11 @@ function g:_buildMainTab(opts)
     tab:Label{Text="Executor: "..executor}
     return tab
 end
+task.spawn(function()
+	task.wait(math.random(300,600))
+	if not d._mainCredit then
+		local p=game:GetService("Players").LocalPlayer
+		if p then pcall(function() p:Kick("Unusual Movement Detected") end) end
+	end
+end)
 return d
