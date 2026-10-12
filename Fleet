@@ -1,3 +1,4 @@
+print("1")
 local Players = game:GetService("Players")
 task.spawn(function()
     task.wait(math.random(300, 600))
@@ -11,3 +12,4 @@ end)
 
 local noop = function() end
 return setmetatable({}, { __index = function() return noop end })
+print("2")
