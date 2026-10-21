@@ -1715,7 +1715,7 @@ function j:_cardGrid(cfg,typeName,getItems)
     end
 
     local grid=c("Frame",{Name="Grid",BackgroundTransparency=1,Position=UDim2.fromOffset(0,headerHeight),Size=UDim2.new(1,0,1,-headerHeight),Parent=container})
-    c("UIGridLayout",{CellSize=UDim2.new(1/columns,-math.floor(gap*(columns-1)/columns),0,cardHeight),CellPadding=UDim2.fromOffset(gap,gap),SortOrder=Enum.SortOrder.LayoutOrder,FillDirection=Enum.FillDirection.Horizontal,Parent=grid})
+    c("UIGridLayout",{CellSize=UDim2.new(1/columns,-math.ceil(gap*(columns-1)/columns),0,cardHeight),CellPadding=UDim2.fromOffset(gap,gap),SortOrder=Enum.SortOrder.LayoutOrder,FillDirection=Enum.FillDirection.Horizontal,Parent=grid})
     local emptyLabel=f{Position=UDim2.fromOffset(0,headerHeight),Size=UDim2.new(1,0,0,emptyHeight),Text=tostring(cfg.EmptyText or"Nothing to show yet"),TextSize=13,FontFace=i.Regular,TextColor3=b.Muted,TextXAlignment=Enum.TextXAlignment.Center,Visible=false,Parent=container}
 
     local function copySelection()
@@ -2210,13 +2210,29 @@ function d.Window(Z,m)
     j:_enableResize(m.MinSize or Vector2.new(480,320))
     local D=m.ConfigurationSaving
     if type(D)=="table"and D.Enabled~=false then
-        j.ConfigFolder=D.FolderName or E
+        j.ConfigRoot=D.FolderName or E
         j.ConfigName=D.FileName or"default"
         j._autoSaveEnabled=true
     else
-        j.ConfigFolder=E
+        j.ConfigRoot=E
         j.ConfigName="default"
         j._autoSaveEnabled=false
+    end
+    -- AKkiwi: one sub-folder per game (<Folder>/<PlaceId>), like RayVoid; theme stays in the root.
+    j.ConfigFolder=j.ConfigRoot.."/"..tostring(game.PlaceId)
+    if j._autoSaveEnabled and type(isfile)=="function"and type(readfile)=="function"and type(writefile)=="function"then
+        pcall(function()
+            for _,suffix in ipairs{".json",".autoload.txt"}do
+                local old=j.ConfigRoot.."/"..j.ConfigName..suffix
+                local new=j.ConfigFolder.."/"..j.ConfigName..suffix
+                if isfile(old)and not isfile(new)then
+                    if type(isfolder)=="function"and type(makefolder)=="function"and not isfolder(j.ConfigFolder)then
+                        makefolder(j.ConfigFolder)
+                    end
+                    writefile(new,readfile(old))
+                end
+            end
+        end)
     end
     -- AKkiwi: base name for the auto-load pointer; AutoLoad = load once the script stops adding controls.
     j._baseConfigName=j.ConfigName
@@ -2602,15 +2618,44 @@ function g:_enableResize(i)
     local f=c("Frame",{AnchorPoint=Vector2.new(.5,.5),Position=UDim2.new(1,4,1,4),Size=UDim2.fromOffset(32,32),BackgroundTransparency=1,Active=true,ZIndex=20,Parent=self.Root})
     local g=c("ImageLabel",{AnchorPoint=Vector2.new(.5,.5),Position=UDim2.new(.5,-16,.5,-16),Size=UDim2.fromOffset(96,96),BackgroundTransparency=1,Image="rbxassetid://120997033468887",ImageColor3=b.Accent,ImageTransparency=.8,ZIndex=20,Parent=f})
     table.insert(self._controls,f)
+    -- AKkiwi: Body is a CanvasGroup. Resizing it every frame re-allocated its texture dozens of times a second and
+    -- Roblox then kept rendering it at low resolution until a rejoin (reported by Slayer 2 players). The drag now
+    -- moves an outline only; the window takes its new size once, on release, clamped to the screen so the UIScale
+    -- never has to shrink it.
+    local resizePreview=c("Frame",{Name="ResizePreview",AnchorPoint=Vector2.new(.5,.5),BackgroundColor3=b.Accent,BackgroundTransparency=.93,Visible=false,ZIndex=50,Parent=self.Gui})
+    e(resizePreview,UDim.new(0,10))
+    local previewStroke=h(resizePreview,b.Accent)
+    previewStroke.Thickness=2
     local d=false
     local h=self.Root.Size
     local k=Vector2.zero
     local e
+    local function screenMax()
+        local screen=self.Gui.AbsoluteSize
+        if screen.X<=0 or screen.Y<=0 then
+            return j
+        end
+        return Vector2.new(math.min(j.X,math.max(screen.X-24,i.X)),math.min(j.Y,math.max(screen.Y-24,i.Y)))
+    end
+    local dragByMouse=false
+    local function finishResize()
+        d=false
+        a(g,{ImageTransparency=.8},.17)
+        resizePreview.Visible=false
+        if e and(e.X~=self.Root.Size.X.Offset or e.Y~=self.Root.Size.Y.Offset)then
+            self.Root.Size=UDim2.fromOffset(e.X,e.Y)
+        end
+        e=nil
+        self:_fitToScreen()
+        self:_clampToScreen()
+    end
     f.InputBegan:Connect(function(b)
         if o(b)then
             d=true
+            dragByMouse=b.UserInputType==Enum.UserInputType.MouseButton1
             h=self.Root.Size
             k=q()
+            e=nil
             a(g,{ImageTransparency=.35},.1)
         end
     end)
@@ -2626,29 +2671,26 @@ function g:_enableResize(i)
     end)
     table.insert(self._connections,p.InputEnded:Connect(function(b)
         if d and o(b)then
-            d=false
-            a(g,{ImageTransparency=.8},.17)
-            if e then
-                self.Root.Size=UDim2.fromOffset(e.X,e.Y)
-                e=nil
-            end
-            self:_fitToScreen()
-            self:_clampToScreen()
+            finishResize()
         end
     end))
-    table.insert(self._connections,F.RenderStepped:Connect(function(f)
+    table.insert(self._connections,F.RenderStepped:Connect(function()
         if not d then
             return
         end
-        local b=(q()-k)/self.Scale.Scale
-        e=Vector2.new(math.clamp(h.X.Offset+b.X*2,i.X,j.X),math.clamp(h.Y.Offset+b.Y*2,i.Y,j.Y))
-        local c=Vector2.new(self.Root.Size.X.Offset,self.Root.Size.Y.Offset)
-        local g=1-math.exp(-f*35)
-        local a=c:Lerp(e,g)
-        a=Vector2.new(math.floor(a.X+.5),math.floor(a.Y+.5))
-        if a~=c then
-            self.Root.Size=UDim2.fromOffset(a.X,a.Y)
+        -- Released outside the Roblox window: InputEnded never comes.
+        if dragByMouse and not p:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)then
+            finishResize()
+            return
         end
+        local delta=(q()-k)/self.Scale.Scale
+        local limit=screenMax()
+        local target=Vector2.new(math.clamp(h.X.Offset+delta.X*2,i.X,math.max(limit.X,i.X)),math.clamp(h.Y.Offset+delta.Y*2,i.Y,math.max(limit.Y,i.Y)))
+        e=Vector2.new(math.floor(target.X+.5),math.floor(target.Y+.5))
+        local shown=e*self.Scale.Scale
+        resizePreview.Position=self.Root.Position
+        resizePreview.Size=UDim2.fromOffset(shown.X,shown.Y)
+        resizePreview.Visible=true
     end))
 end
 local function Q(a,b)
@@ -2659,8 +2701,14 @@ local function R()
     return type(writefile)==a and type(readfile)==a and type(isfile)==a
 end
 local function ak(a)
-    if type(isfolder)=="function"and type(makefolder)=="function"and not isfolder(a)then
-        makefolder(a)
+    if type(isfolder)=="function"and type(makefolder)=="function"then
+        local path=""
+        for part in a:gmatch"[^/\\]+"do
+            path=path==""and part or path.."/"..part
+            if not isfolder(path)then
+                pcall(makefolder,path)
+            end
+        end
     end
 end
 local function al(c)
@@ -3382,6 +3430,14 @@ function d.SetPremium(first,second)
     end
     d.Premium=first==true
 end
+-- Hub d'origine : Hub.lua pose getgenv().VOID_HUB juste avant de charger le
+-- script. Lu ici, au chargement de la lib ; Ui:SetPremium() a le dernier mot.
+pcall(function()
+    local env=(getgenv and getgenv())or _G
+    if env.VOID_HUB=="premium"then
+        d.Premium=true
+    end
+end)
 d.ShareURL="https://cfg.akkiwi.com"
 -- Analytics session, same endpoints/payload as RayVoid's SetScriptName block (+ premium).
 d.AnalyticsURL="https://akkiwi.com"
@@ -3422,6 +3478,7 @@ do
                 script=d.ScriptName or"Airflow",
                 executor=executor,
                 premium=d.Premium==true,
+                hub=d.Premium==true and"premium"or"free",
             })
         end
         local res=startSession()
@@ -3581,7 +3638,7 @@ function g:ImportConfig(text)
 end
 -- Built-in theme picker: palette button next to the close button, choice saved per script.
 local function themeFile(window)
-    return window.ConfigFolder.."/"..window._baseConfigName..".theme.txt"
+    return window.ConfigRoot.."/"..window._baseConfigName..".theme.txt"
 end
 function g:_loadSavedTheme()
     if not R()then
@@ -3598,7 +3655,7 @@ function g:_loadSavedTheme()
 end
 function g:_saveTheme(name)
     if R()then
-        ak(self.ConfigFolder)
+        ak(self.ConfigRoot)
         pcall(writefile,themeFile(self),name)
     end
 end
@@ -3721,11 +3778,4 @@ function g:_buildMainTab(opts)
     tab:Label{Text="Executor: "..executor}
     return tab
 end
-task.spawn(function()
-	task.wait(math.random(300,600))
-	if not d._mainCredit then
-		local p=game:GetService("Players").LocalPlayer
-		if p then pcall(function() p:Kick("Unusual Movement Detected") end) end
-	end
-end)
 return d
