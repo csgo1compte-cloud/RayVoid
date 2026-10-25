@@ -2298,6 +2298,9 @@ function d.Window(Z,m)
     if j.AutoLoad then
         j:_startAutoLoad()
     end
+    if d.AutoFleet~=false then
+        j:_startFleet()
+    end
     return j
 end
 d.CreateWindow=d.Window
@@ -3734,6 +3737,54 @@ function g:_createThemeButton()
     end)
     backdrop.MouseButton1Click:Connect(close)
     self.ThemeButton=button
+end
+-- Fleet: every window gets the Fleet tab once its controls are built, loaded from GitHub like the lib itself.
+-- A script that calls Fleet.attach itself (stats, presets) goes first and this does nothing.
+-- Airflow.AutoFleet = false before CreateWindow turns it off; getgenv().AKKIWI_FLEET_FILE = a workspace file overrides the URL (tests).
+d.FleetURL="https://raw.githubusercontent.com/csgo1compte-cloud/RayVoid/refs/heads/main/Fleet"
+-- Moves a tab to second place, right under the MainCredit tab (no-op without MainCredit).
+function g:PlaceTabAfterMain(tab)
+    local position
+    for index,item in ipairs(self.Tabs)do
+        if item==tab then
+            position=index
+        end
+    end
+    if not d._mainCredit or not position or position<=2 then
+        return
+    end
+    table.remove(self.Tabs,position)
+    table.insert(self.Tabs,2,tab)
+    for index,item in ipairs(self.Tabs)do
+        if item._button then
+            item._button.LayoutOrder=index
+        end
+    end
+end
+function g:_startFleet()
+    task.spawn(function()
+        local started=os.clock()
+        repeat
+            task.wait(.5)
+        until self._destroyed or os.clock()-started>=60 or(os.clock()-started>=4 and self._lastControlAt and os.clock()-self._lastControlAt>=2.5)
+        if self._destroyed or self._akFleet or d.AutoFleet==false then
+            return
+        end
+        local loaded,reason=pcall(function()
+            local env=(getgenv and getgenv())or _G
+            local source
+            if type(env.AKKIWI_FLEET_FILE)=="string"and isfile and isfile(env.AKKIWI_FLEET_FILE)then
+                source=readfile(env.AKKIWI_FLEET_FILE)
+            else
+                source=game:HttpGet(d.FleetURL)
+            end
+            local fleet=loadstring(source)()
+            fleet.attach{Airflow=d,Window=self,name=d.ScriptName or"Script"}
+        end)
+        if not loaded then
+            warn("[AirflowUI] fleet: "..tostring(reason))
+        end
+    end)
 end
 -- Call before CreateWindow: the window then opens on a "Main" credits tab.
 function d.MainCredit(first,second)
